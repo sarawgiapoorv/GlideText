@@ -1,5 +1,5 @@
 """
-main.py — Zero-Touch Bootstrapper and Entry point for LocalFlow.
+main.py — Zero-Touch Bootstrapper and Entry point for GlideText.
 
 Launches the CustomTkinter desktop GUI after performing a silent dependency setup.
 All coordination, hotkey handling, and backend logic live in gui_app.py.
@@ -7,7 +7,7 @@ All coordination, hotkey handling, and backend logic live in gui_app.py.
 Usage:
     python main.py          (from an elevated terminal)
     pythonw main.py         (silent, no console window)
-    Launch_LocalFlow.bat    (auto-elevates & silent)
+    Launch_GlideText.bat    (auto-elevates & silent)
 """
 
 import sys
@@ -77,7 +77,7 @@ def run_installer(status_label, root):
             status_label.config(text="Some components failed. Retrying...")
             time.sleep(2)
         else:
-            status_label.config(text="Environment ready! Starting LocalFlow...")
+            status_label.config(text="Environment ready! Starting GlideText...")
             time.sleep(1)
             
     except Exception as e:
@@ -93,7 +93,7 @@ def show_splash_screen():
     import tkinter as tk
     
     root = tk.Tk()
-    root.title("LocalFlow Setup")
+    root.title("GlideText Setup")
     
     # Design colors
     bg_color = "#0f172a"      # Slate 900
@@ -118,7 +118,7 @@ def show_splash_screen():
     frame.pack(fill="both", expand=True)
     
     # Title Label
-    title_label = tk.Label(frame, text="LocalFlow", bg=bg_color, fg=accent_color, font=("Segoe UI", 26, "bold"))
+    title_label = tk.Label(frame, text="GlideText", bg=bg_color, fg=accent_color, font=("Segoe UI", 26, "bold"))
     title_label.pack(pady=(35, 10))
     
     # Subtitle Label
@@ -165,7 +165,7 @@ def sanitize_traceback(tb_str: str) -> str:
 # FreeLLMAPI lifecycle -- delegated to freellm_manager.py
 # ---------------------------------------------------------------------------
 # Import lazily inside functions so this module still loads even if
-# freellm_manager has a syntax error (defensive: won't crash LocalFlow).
+# freellm_manager has a syntax error (defensive: won't crash GlideText).
 
 def _get_manager():
     """Lazily import freellm_manager to avoid circular import at module load time."""
@@ -248,8 +248,8 @@ def main():
         ensure_freellmapi_running()
 
         # Import the main GUI app dynamically now that dependencies are guaranteed
-        from gui_app import LocalFlowApp
-        app = LocalFlowApp(start_silent=start_silent)
+        from gui_app import GlideTextApp
+        app = GlideTextApp(start_silent=start_silent)
         app.mainloop()
     except Exception as e:
         import traceback
@@ -272,8 +272,8 @@ def main():
             root = tk.Tk()
             root.withdraw()
             messagebox.showerror(
-                "LocalFlow Startup Crash",
-                f"LocalFlow failed to start.\n\n"
+                "GlideText Startup Crash",
+                f"GlideText failed to start.\n\n"
                 f"Error: {e}\n\n"
                 f"The full traceback has been written to 'crash_report.txt' in the application directory."
             )

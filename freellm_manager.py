@@ -1,5 +1,5 @@
 """
-freellm_manager.py -- FreeLLMAPI Headless Lifecycle Manager for LocalFlow
+freellm_manager.py -- FreeLLMAPI Headless Lifecycle Manager for GlideText
 ==========================================================================
 
 Responsibilities:
@@ -56,7 +56,7 @@ TCP_CONNECT_TIMEOUT: float = 0.5              # per-probe timeout
 # Key used to persist the confirmed FreeLLMAPI directory inside config.txt
 _CONFIG_KEY = "FREELLMAPI_DIR"
 
-# All name variants LocalFlow will scan for (case-insensitive covered by listing both)
+# All name variants GlideText will scan for (case-insensitive covered by listing both)
 _DIR_NAMES: list[str] = [
     "freellmapi",
     "FreeLLMAPI",
@@ -128,8 +128,8 @@ def locate_freellmapi_dir() -> Optional[str]:
     Search order (first match wins):
       1. FREELLMAPI_DIR environment variable
       2. Saved path in config.txt  (key = FREELLMAPI_DIR)
-      3. Sibling of LocalFlow on Desktop / OneDrive Desktop / home
-      4. Subfolder *inside* LocalFlow (edge case: bundled setup)
+      3. Sibling of GlideText on Desktop / OneDrive Desktop / home
+      4. Subfolder *inside* GlideText (edge case: bundled setup)
       5. Absolute Desktop paths (Windows: C:\\Users\\<user>\\Desktop\\*)
     """
     # 1. Env var
@@ -151,8 +151,8 @@ def locate_freellmapi_dir() -> Optional[str]:
     home = os.path.expanduser("~")
 
     base_dirs: list[str] = [
-        parent_dir,                                              # sibling of LocalFlow
-        self_dir,                                               # subfolder inside LocalFlow
+        parent_dir,                                              # sibling of GlideText
+        self_dir,                                               # subfolder inside GlideText
         home,
         os.path.join(home, "Desktop"),
         os.path.join(home, "OneDrive", "Desktop"),
@@ -183,7 +183,7 @@ def locate_freellmapi_dir() -> Optional[str]:
 
     logging.warning(
         "[FreeLLM] Directory not found. "
-        "Set FREELLMAPI_DIR env var or place it adjacent to LocalFlow. "
+        "Set FREELLMAPI_DIR env var or place it adjacent to GlideText. "
         "Example: C:\\Users\\<you>\\OneDrive\\Desktop\\freellmapi"
     )
     return None
@@ -317,7 +317,7 @@ def start(poll_timeout: float = STARTUP_POLL_TIMEOUT) -> bool:
     if not npm_path:
         logging.warning(
             "[FreeLLM] npm not found on PATH. "
-            "Install Node.js from https://nodejs.org and restart LocalFlow."
+            "Install Node.js from https://nodejs.org and restart GlideText."
         )
         return False
 
@@ -352,7 +352,7 @@ def start(poll_timeout: float = STARTUP_POLL_TIMEOUT) -> bool:
         logging.warning(
             f"[FreeLLM] Server did not respond within {poll_timeout:.0f}s. "
             f"FreeLLMAPI may still be starting (large node_modules first run). "
-            f"LocalFlow will retry on the first dictation via ai_brain.py."
+            f"GlideText will retry on the first dictation via ai_brain.py."
         )
     return ready
 

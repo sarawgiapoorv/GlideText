@@ -1,5 +1,5 @@
 """
-gui_app.py -- Production-grade CustomTkinter GUI for LocalFlow.
+gui_app.py -- Production-grade CustomTkinter GUI for GlideText.
 
 Rebuilt from scratch with:
   - Premium dark-mode interface with recording pulse animation
@@ -28,9 +28,9 @@ import logging
 from logging.handlers import RotatingFileHandler
 
 # Setup persistent rotating file logging
-_log_dir = os.path.join(os.getenv("LOCALAPPDATA", os.path.expanduser("~")), "LocalFlow", "logs")
+_log_dir = os.path.join(os.getenv("LOCALAPPDATA", os.path.expanduser("~")), "GlideText", "logs")
 os.makedirs(_log_dir, exist_ok=True)
-_log_file = os.path.join(_log_dir, "localflow.log")
+_log_file = os.path.join(_log_dir, "glidetext.log")
 
 _logger = logging.getLogger()
 _logger.setLevel(logging.INFO)
@@ -104,10 +104,10 @@ def _read_config():
     config_valid = True
     config_missing_or_empty = False
     
-    # Retrieve API key securely via keyring
+    # Retrieve API key securely via keyring (check GlideText first, fall back to legacy LocalFlow)
     if HAS_KEYRING:
         try:
-            key = keyring.get_password("LocalFlow", "api_key")
+            key = keyring.get_password("GlideText", "api_key") or keyring.get_password("LocalFlow", "api_key")
             if key:
                 result["api_key"] = key
         except Exception as e:
@@ -155,13 +155,13 @@ def _read_config():
                 messagebox.showwarning(
                     "Configuration Missing",
                     "Configuration file (config.txt) was missing or empty.\n"
-                    "LocalFlow has created a new configuration file with default values (Device Index: 0)."
+                    "GlideText has created a new configuration file with default values (Device Index: 0)."
                 )
             else:
                 messagebox.showwarning(
                     "Configuration Corrupted",
                     "Configuration file (config.txt) was improperly formatted.\n"
-                    "LocalFlow has restored default values (Device Index: 0)."
+                    "GlideText has restored default values (Device Index: 0)."
                 )
             root.destroy()
         except Exception as msg_err:
@@ -182,8 +182,12 @@ def _write_config(api_key: str, device_index):
     if HAS_KEYRING:
         try:
             if api_key:
-                keyring.set_password("LocalFlow", "api_key", api_key)
+                keyring.set_password("GlideText", "api_key", api_key)
             else:
+                try:
+                    keyring.delete_password("GlideText", "api_key")
+                except Exception:
+                    pass
                 try:
                     keyring.delete_password("LocalFlow", "api_key")
                 except Exception:
@@ -235,8 +239,8 @@ FONT_SERIF = "Georgia"
 # Application
 # ======================================================================
 
-class LocalFlowApp(ctk.CTk):
-    """Main LocalFlow desktop application."""
+class GlideTextApp(ctk.CTk):
+    """Main GlideText desktop application."""
 
     def __init__(self, start_silent: bool = False):
         super().__init__()
@@ -245,7 +249,7 @@ class LocalFlowApp(ctk.CTk):
         set_thread_priority(-1)
 
         # -- Window --
-        self.title("LocalFlow")
+        self.title("GlideText")
         self.geometry("540x860")
         self.minsize(480, 700)
         self.configure(fg_color=C.BG_DEEP)
@@ -384,7 +388,7 @@ class LocalFlowApp(ctk.CTk):
         self.header_frame.pack_propagate(False)
 
         ctk.CTkLabel(
-            self.header_frame, text="LocalFlow",
+            self.header_frame, text="GlideText",
             font=(FONT_SERIF, 26, "bold"), text_color=C.TEXT,
         ).pack(side="left")
 
@@ -558,7 +562,7 @@ class LocalFlowApp(ctk.CTk):
 
         # Auto-Boot Toggle (Windows Registry)
         self.autoboot_switch = ctk.CTkSwitch(
-            inner, text="Start LocalFlow with Windows Boot",
+            inner, text="Start GlideText with Windows Boot",
             font=(FONT, 13, "bold"), text_color=C.TEXT,
             progress_color=C.GREEN, button_color="#ffffff",
             button_hover_color="#e2e8f0", command=self._on_autoboot_toggle
@@ -1088,7 +1092,14 @@ class LocalFlowApp(ctk.CTk):
                 0, 
                 winreg.KEY_READ
             )
-            val, _ = winreg.QueryValueEx(key, "LocalFlow")
+            val = None
+            try:
+                val, _ = winreg.QueryValueEx(key, "GlideText")
+            except FileNotFoundError:
+                try:
+                    val, _ = winreg.QueryValueEx(key, "LocalFlow")
+                except FileNotFoundError:
+                    val = None
             winreg.CloseKey(key)
             return bool(val)
         except Exception:
@@ -1110,12 +1121,21 @@ class LocalFlowApp(ctk.CTk):
                 winreg.KEY_SET_VALUE
             )
             if is_autoboot:
-                winreg.SetValueEx(key, "LocalFlow", 0, winreg.REG_SZ, cmd_string)
-                logging.info("[Registry] Set LocalFlow to run on boot.")
-            else:
+                winreg.SetValueEx(key, "GlideText", 0, winreg.REG_SZ, cmd_string)
+                logging.info("[Registry] Set GlideText to run on boot.")
+                # Clean up legacy registry key if present
                 try:
                     winreg.DeleteValue(key, "LocalFlow")
-                    logging.info("[Registry] Removed LocalFlow from boot.")
+                except FileNotFoundError:
+                    pass
+            else:
+                try:
+                    winreg.DeleteValue(key, "GlideText")
+                    logging.info("[Registry] Removed GlideText from boot.")
+                except FileNotFoundError:
+                    pass
+                try:
+                    winreg.DeleteValue(key, "LocalFlow")
                 except FileNotFoundError:
                     pass
             winreg.CloseKey(key)
@@ -1216,7 +1236,7 @@ class LocalFlowApp(ctk.CTk):
             icon_img = self._make_tray_icon()
             menu = pystray.Menu(
                 pystray.MenuItem(
-                    "Show LocalFlow", self._tray_show, default=True,
+                    "Show GlideText", self._tray_show, default=True,
                 ),
                 pystray.MenuItem(
                     "Toggle Widget Mode", lambda: self.after(0, self._toggle_widget_mode)
@@ -1225,7 +1245,7 @@ class LocalFlowApp(ctk.CTk):
                 pystray.MenuItem("Quit", self._tray_quit),
             )
             self._tray_icon = pystray.Icon(
-                "LocalFlow", icon_img, "LocalFlow -- Ready", menu,
+                "GlideText", icon_img, "GlideText -- Ready", menu,
             )
             threading.Thread(
                 target=self._tray_icon.run, daemon=True,
@@ -1656,3 +1676,7 @@ class LocalFlowApp(ctk.CTk):
                 pass
             with self._lock:
                 self._is_processing = False
+
+
+# Backward compatibility alias
+LocalFlowApp = GlideTextApp

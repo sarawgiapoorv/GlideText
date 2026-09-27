@@ -1,5 +1,5 @@
 """
-ai_brain.py -- Two-stage cloud AI pipeline for LocalFlow.
+ai_brain.py -- Two-stage cloud AI pipeline for GlideText.
 
 Rebuilt from scratch with:
   - Stage 1: Audio transcription via Gemini multimodal (Base64 WAV inline)
@@ -374,7 +374,7 @@ class AIBrain:
             logging.info("[AIBrain] keyring library is not available.")
             return []
         try:
-            raw = keyring.get_password("LocalFlow", "api_key")
+            raw = keyring.get_password("GlideText", "api_key") or keyring.get_password("LocalFlow", "api_key")
             if not raw:
                 return []
             # Support comma-separated keys: "key1,key2,key3"
@@ -465,7 +465,7 @@ class AIBrain:
                     # Persist to Credential Manager for future launches
                     if HAS_KEYRING:
                         try:
-                            keyring.set_password("LocalFlow_FreeLLM", "api_key", key)
+                            keyring.set_password("GlideText_FreeLLM", "api_key", key)
                             logging.info(
                                 "[AIBrain] FreeLLMAPI unified master API key auto-discovered "
                                 "from local DB and vaulted successfully."
@@ -486,7 +486,7 @@ class AIBrain:
         Load the FreeLLMAPI unified API key using a 4-tier resolution hierarchy:
 
           Tier 1 — FREELLMAPI_API_KEY environment variable (fastest, CI-friendly)
-          Tier 2 — Windows Credential Manager  (keyring: LocalFlow_FreeLLM / api_key)
+          Tier 2 — Windows Credential Manager  (keyring: GlideText_FreeLLM / api_key)
           Tier 3 — Auto-discovery from FreeLLMAPI's local SQLite DB (freeapi.db)
                    → Discovered key is automatically vaulted to Tier 2 for future use.
           Tier 4 — Fail with an explicit, actionable log message (no silent empty return).
@@ -500,10 +500,10 @@ class AIBrain:
             logging.debug("[AIBrain] FreeLLMAPI key resolved from FREELLMAPI_API_KEY env var.")
             return env_key
 
-        # Tier 2: Windows Credential Manager
+        # Tier 2: Windows Credential Manager (check GlideText_FreeLLM first, then legacy LocalFlow_FreeLLM)
         if HAS_KEYRING:
             try:
-                val = keyring.get_password("LocalFlow_FreeLLM", "api_key")
+                val = keyring.get_password("GlideText_FreeLLM", "api_key") or keyring.get_password("LocalFlow_FreeLLM", "api_key")
                 if val and val.strip():
                     logging.debug("[AIBrain] FreeLLMAPI key resolved from Windows Credential Manager.")
                     return val.strip()
@@ -522,7 +522,7 @@ class AIBrain:
             "FreeLLMAPI (Tier 1) will be SKIPPED. "
             "Fix: open the FreeLLMAPI dashboard at http://127.0.0.1:3001, "
             "copy the API key from Settings, and store it via: "
-            "keyring.set_password('LocalFlow_FreeLLM', 'api_key', '<your-key>')"
+            "keyring.set_password('GlideText_FreeLLM', 'api_key', '<your-key>')"
         )
         return ""
 
@@ -762,7 +762,7 @@ class AIBrain:
         """
         # ── Guard: fast-fail if no key is available ─────────────────────────
         # Attempt a live re-resolve so a key discovered after startup (e.g.
-        # FreeLLMAPI started after LocalFlow) is picked up automatically.
+        # FreeLLMAPI started after GlideText) is picked up automatically.
         if not self._freellmapi_api_key:
             self._freellmapi_api_key = self._load_freellmapi_api_key()
 
@@ -1247,8 +1247,8 @@ class AIBrain:
             logging.warning(
                 "[AIBrain] Tier 2 SKIPPED: No Gemini API key is configured. "
                 "Set one via the GUI Settings or store in Windows Credential Manager "
-                "under service='LocalFlow', username='api_key'. "
-                "This is why LocalFlow fell through to local Ollama."
+                "under service='GlideText', username='api_key'. "
+                "This is why GlideText fell through to local Ollama."
             )
 
 

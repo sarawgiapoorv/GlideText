@@ -1,5 +1,5 @@
 """
-text_injector.py — OS-level text injection for LocalFlow.
+text_injector.py — OS-level text injection for GlideText.
 
 Types text directly at the active Windows cursor position using simulated
 keystrokes. Works in any application: browsers, editors, chat apps, terminals.

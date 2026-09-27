@@ -1,5 +1,5 @@
 """
-history_vault.py — Persistent local history logging for LocalFlow.
+history_vault.py — Persistent local history logging for GlideText.
 
 Uses SQLite to store every dictation result with timestamps.
 The database file is co-located with the application files.
@@ -7,16 +7,25 @@ The database file is co-located with the application files.
 
 import sqlite3
 import os
+import shutil
 from datetime import datetime
 
 
 # ---------------------------------------------------------------------------
 # Database path — same directory as this script
 # ---------------------------------------------------------------------------
-DB_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "localflow_history.db",
-)
+_base_dir = os.path.dirname(os.path.abspath(__file__))
+_old_db = os.path.join(_base_dir, "localflow_history.db")
+_new_db = os.path.join(_base_dir, "glidetext_history.db")
+
+# Seamless migration from legacy LocalFlow database if present
+if os.path.exists(_old_db) and not os.path.exists(_new_db):
+    try:
+        shutil.copy2(_old_db, _new_db)
+    except Exception:
+        pass
+
+DB_PATH = _new_db
 
 
 class HistoryVault:

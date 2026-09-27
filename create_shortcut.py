@@ -1,8 +1,8 @@
-﻿import os
+import os
 import subprocess
 
-vbs_path = r"c:\Users\jai shree shyam\OneDrive\Desktop\LocalFlow\Launch_LocalFlow.vbs"
-project_dir = r"c:\Users\jai shree shyam\OneDrive\Desktop\LocalFlow"
+vbs_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Launch_GlideText.vbs")
+project_dir = os.path.dirname(os.path.abspath(__file__))
 user_profile = os.environ.get("USERPROFILE", r"C:\Users\jai shree shyam")
 
 desktops = [
@@ -12,14 +12,14 @@ desktops = [
 
 for d in desktops:
     if os.path.exists(d):
-        lnk = os.path.join(d, "LocalFlow.lnk")
+        lnk = os.path.join(d, "GlideText.lnk")
         ps = f"""
 $ws = New-Object -ComObject WScript.Shell
 $s = $ws.CreateShortcut('{lnk}')
 $s.TargetPath = 'wscript.exe'
 $s.Arguments = '"{vbs_path}"'
 $s.WorkingDirectory = '{project_dir}'
-$s.Description = 'LocalFlow - Speech to Mind Voice Dictation'
+$s.Description = 'GlideText - Speech to Mind Voice Dictation'
 $s.Save()
 """
         subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True)

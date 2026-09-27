@@ -1,5 +1,5 @@
 """
-audio_recorder.py -- Microphone capture module for LocalFlow.
+audio_recorder.py -- Microphone capture module for GlideText.
 
 Rebuilt from scratch with:
   - Callback-based streaming via sounddevice (16 kHz, mono, int16)

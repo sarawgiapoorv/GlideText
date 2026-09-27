@@ -9,10 +9,10 @@ Performs layered checks:
   Check 4  - POST /v1/chat/completions with first explicitly-named model from /v1/models
   Check 5  - Repeat Check 3/4 WITHOUT Authorization header (keyless mode)
 
-Run from the LocalFlow directory:
+Run from the GlideText directory:
     python diagnose_freellmapi.py
 
-The script is self-contained -- no LocalFlow imports needed.
+The script is self-contained -- no GlideText imports needed.
 """
 
 import json
@@ -197,7 +197,7 @@ def check_1_reachability() -> list[str]:
             f"\n  [DIAGNOSIS] Port {PORT} is not accepting connections on ANY address.\n"
             f"  FreeLLMAPI server is NOT RUNNING. Start it with:\n"
             f"    cd <freellmapi-dir> && npm run dev\n"
-            f"  or let LocalFlow auto-start it by running main.py."
+            f"  or let GlideText auto-start it by running main.py."
         )
     return reachable
 
@@ -308,7 +308,7 @@ def check_3_completions(discovered_models: list[str]) -> None:
 
 if __name__ == "__main__":
     print(SEPARATOR)
-    print("  LocalFlow -- FreeLLMAPI Diagnostic Script")
+    print("  GlideText -- FreeLLMAPI Diagnostic Script")
     print(f"  Target: {FREELLM_BASE}")
     print(f"  Auth key configured: {'YES (from env FREELLMAPI_API_KEY)' if FREELLMAPI_API_KEY else 'NO  (will try keyless and dummy Bearer free)'}")
     print(SEPARATOR)
