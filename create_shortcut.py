@@ -1,9 +1,9 @@
 import os
 import subprocess
 
-vbs_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Launch_GlideText.vbs")
 project_dir = os.path.dirname(os.path.abspath(__file__))
-user_profile = os.environ.get("USERPROFILE", r"C:\Users\jai shree shyam")
+bat_path = os.path.join(project_dir, "Launch_GlideText.bat")
+user_profile = os.environ.get("USERPROFILE", os.path.expanduser("~"))
 
 desktops = [
     os.path.join(user_profile, "OneDrive", "Desktop"),
@@ -12,16 +12,23 @@ desktops = [
 
 for d in desktops:
     if os.path.exists(d):
+        # Clean up legacy shortcut if present
+        legacy_lnk = os.path.join(d, "LocalFlow.lnk")
+        if os.path.exists(legacy_lnk):
+            try:
+                os.remove(legacy_lnk)
+                print(f"Removed legacy shortcut: {legacy_lnk}")
+            except Exception as e:
+                print(f"Could not remove legacy shortcut: {e}")
+
         lnk = os.path.join(d, "GlideText.lnk")
         ps = f"""
 $ws = New-Object -ComObject WScript.Shell
 $s = $ws.CreateShortcut('{lnk}')
-$s.TargetPath = 'wscript.exe'
-$s.Arguments = '"{vbs_path}"'
+$s.TargetPath = '{bat_path}'
 $s.WorkingDirectory = '{project_dir}'
 $s.Description = 'GlideText - Speech to Mind Voice Dictation'
 $s.Save()
 """
         subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True)
         print(f"Shortcut created at: {lnk} (exists: {os.path.exists(lnk)})")
-

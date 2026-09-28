@@ -242,6 +242,14 @@ def _spawn(freellm_dir: str, npm_path: str) -> Optional[subprocess.Popen]:
     creation_flags = 0x08000000 if sys.platform == "win32" else 0
     use_shell = sys.platform == "win32"
 
+    log_dir = os.path.join(os.getenv("LOCALAPPDATA", os.path.expanduser("~")), "GlideText", "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_file_path = os.path.join(log_dir, "freellmapi.log")
+    try:
+        log_file = open(log_file_path, "a", encoding="utf-8")
+    except Exception as log_err:
+        logging.warning(f"[FreeLLM] Could not open log file {log_file_path}: {log_err}")
+        log_file = subprocess.DEVNULL
 
     logging.info(f"[FreeLLM] Spawning: {' '.join(cmd)}  cwd={freellm_dir}")
     try:
@@ -249,8 +257,8 @@ def _spawn(freellm_dir: str, npm_path: str) -> Optional[subprocess.Popen]:
             cmd,
             cwd=freellm_dir,
             creationflags=creation_flags,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=log_file,
             shell=use_shell,
         )
         logging.info(f"[FreeLLM] Spawned PID {proc.pid}")

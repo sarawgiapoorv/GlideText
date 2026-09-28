@@ -69,8 +69,10 @@ except ImportError:
 try:
     import noisereduce as nr
     HAS_NOISE_REDUCE = True
-except Exception:
+    logging.info("  [Recorder] Noise suppression: ACTIVE (noisereduce loaded)")
+except Exception as e:
     HAS_NOISE_REDUCE = False
+    logging.warning(f"  [Recorder] Noise suppression: DISABLED (noisereduce import failed: {e})")
 
 
 # ---------------------------------------------------------------------------
@@ -565,7 +567,7 @@ class AudioRecorder:
 
         # Apply DSP noise suppression
         if HAS_NOISE_REDUCE:
-            logging.info("  [Recorder] Applying noise suppression...")
+            logging.info("  [Recorder] Noise suppression is active. Applying reduction...")
             try:
                 # noisereduce expects flat array for mono
                 flat_audio = audio_data.flatten()
@@ -574,7 +576,9 @@ class AudioRecorder:
                 clipped = np.clip(reduced, -32768.0, 32767.0)
                 audio_data = clipped.astype(np.int16).reshape(-1, 1)
             except Exception as e:
-                logging.info(f"  [Recorder] Noise suppression failed: {e}")
+                logging.error(f"  [Recorder] Noise suppression processing failed: {e}")
+        else:
+            logging.info("  [Recorder] Noise suppression is disabled.")
 
         # Check if wavio is available before trying to write
         if not HAS_WAVIO:
@@ -583,7 +587,7 @@ class AudioRecorder:
 
         # Write to a temp .wav file with a unique name to avoid races in continuous mode
         import uuid
-        tmp_dir = os.path.join(tempfile.gettempdir(), "localflow")
+        tmp_dir = os.path.join(tempfile.gettempdir(), "glidetext")
         os.makedirs(tmp_dir, exist_ok=True)
         filepath = os.path.join(tmp_dir, f"rec_{uuid.uuid4().hex}.wav")
 
