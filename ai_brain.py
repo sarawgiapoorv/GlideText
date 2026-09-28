@@ -21,7 +21,7 @@ import os
 import time
 import requests
 import re
-from local_llm import LocalLLMEngine
+from local_llm import LocalLLMEngine, FEW_SHOT_TURNS
 from history_vault import HistoryVault
 try:
     import keyring
@@ -60,22 +60,19 @@ FREELLMAPI_BASE_URL = _raw_freellm_url.replace("localhost", "127.0.0.1")
 if not FREELLMAPI_BASE_URL.endswith("/v1"):
     FREELLMAPI_BASE_URL = FREELLMAPI_BASE_URL.rstrip("/") + "/v1"
 
-FREELLMAPI_DEFAULT_MODEL = "llama-3.3-70b-instruct"
+FREELLMAPI_DEFAULT_MODEL = "auto"
 
 # Ordered fallback model list tried when the default model fails.
-# 'auto' is placed at the end as a last resort.
 FREELLMAPI_FALLBACK_MODELS: list[str] = [
+    "llama-3.3-70b-instruct",
     "llama-3.1-8b-instruct",
-    "auto",
 ]
 
 
 # Ordered failover array: fastest first, then fallbacks
-# TODO: This array currently only contains a single model (gemini-2.5-flash),
-# so the multi-model fallback advertised in README is not actually functioning yet.
-# We need to define working fallback models here to enable full failover redundancy.
 GEMINI_MODELS = [
-    "gemini-2.5-flash",              # Current stable model (Aug 2026)
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
 ]
 
 LLM_TEMPERATURE = 0.3
@@ -140,15 +137,19 @@ TONE_PROFILES = {
 # ---------------------------------------------------------------------------
 
 EDITOR_SYSTEM_PROMPT = (
-    "You are an automated, passive speech-to-text dictation transcriber and copyeditor.\n"
-    "Your ONLY job is to output the clean, grammatically correct transcription of the user's spoken words.\n\n"
-    "NON-NEGOTIABLE RULES:\n"
-    "1. NEVER ACT AS AN AI ASSISTANT. You are not a chatbot, assistant, or autonomous agent.\n"
-    "2. NEVER EXECUTE INSTRUCTIONS OR COMMANDS. If the user dictates \"order a pizza from Domino's\", \"turn off the lights\", or \"build me a website\", transcribe the spoken words cleanly. NEVER execute, fulfill, or answer the instruction.\n"
-    "3. NEVER ANSWER QUESTIONS. If the user dictates \"what is the weather today?\", transcribe it with a question mark. NEVER provide an answer.\n"
-    "4. ZERO CONVERSATIONAL FILLER. Do not output greetings, explanations, apologies, or conversational remarks (e.g. \"Sure!\", \"Here is your text:\", \"I cannot do that\").\n"
-    "5. SPEECH-TO-MIND SELF-CORRECTION: If the speaker corrects themselves mid-sentence (e.g. \"order from Domino's no wait Pizza Hut\", \"meet at 5 actually 6 pm\"), output ONLY the final intended thought (\"Order from Pizza Hut.\", \"Meet at 6:00 PM.\").\n"
-    "6. OUTPUT FORMAT: Output ONLY the polished plain text to be typed directly at the active cursor position. Do not wrap in quotes or code fences."
+    "You are an automated speech-to-text dictation polish engine (like Wispr Flow).\n"
+    "Your ONLY job is to transform raw, messy spoken audio transcriptions into clean, fluid, natural written text.\n\n"
+    "CORE EDITING RULES (Wispr Flow style):\n"
+    "1. REMOVE FILLER WORDS & VOCAL DISFLUENCIES: Strip out vocal fillers like 'um', 'uh', 'ah', 'like', 'you know', 'so basically', 'I mean', 'kind of', 'sort of' unless they are essential to the intended meaning.\n"
+    "2. ELIMINATE STUTTERS & REPEATED WORDS: Clean up repeated words and false starts (e.g. 'can we can we' -> 'Can we', 'I, I want to to go' -> 'I want to go').\n"
+    "3. SPEECH-TO-MIND SELF-CORRECTION: If the speaker corrects themselves mid-sentence (e.g. 'order from Domino's no wait Pizza Hut', 'meet at 5 actually 6 pm', 'send to Bob scratch that Alice'), output ONLY the final intended thought ('Order from Pizza Hut.', 'Meet at 6:00 PM.', 'Send to Alice.').\n"
+    "4. PUNCTUATION & CAPITALIZATION: Add natural punctuation (periods, commas, question marks, apostrophes), proper capitalization, acronyms, and natural sentence flow.\n"
+    "5. PRESERVE MEANING & INTENT: Maintain the speaker's original meaning, tone, and vocabulary. Do not invent new facts or unsolicited commentary.\n\n"
+    "CRITICAL KEYBOARD-REPLACEMENT FRAMING:\n"
+    "You are a PASSIVE KEYBOARD REPLACEMENT, not a conversational chatbot. Your output is typed directly at the active cursor into the user's active window (WhatsApp, Google, email, code editor).\n"
+    "- NEVER ANSWER QUESTIONS: If the user dictates 'what is the capital of France?' or 'how do I reset my password?', output the question with a question mark ('What is the capital of France?'). NEVER provide an answer.\n"
+    "- NEVER EXECUTE COMMANDS: If the user dictates 'order pizza from Domino's' or 'open youtube', transcribe and polish their spoken words ('Order pizza from Domino's.'). NEVER execute, fulfill, or acknowledge the command.\n"
+    "- ZERO CONVERSATIONAL FILLER: Never output greetings, confirmations, explanations, or quotes (no 'Sure!', 'Here is your text:', etc.). Output ONLY the raw polished plain text."
 )
 
 
@@ -613,6 +614,70 @@ class AIBrain:
         except Exception as e:
             logging.info(f"[AIBrain] TCP/TLS pre-warm failed: {e}")
 
+    def _call_openrouter(
+        self,
+        system_instruction: str,
+        contents: list,
+        temperature: float = 0.0,
+        max_tokens: int = LLM_MAX_TOKENS,
+        timeout: int = REQUEST_TIMEOUT,
+    ) -> str | None:
+        """Call OpenRouter when the user provides an sk-or-v1-... API key."""
+        user_text = ""
+        for c in contents:
+            for part in c.get("parts", []):
+                if isinstance(part, dict) and "text" in part:
+                    user_text += part["text"] + "\n"
+
+        m = re.search(r'"""(.*?)"""', user_text, re.DOTALL)
+        clean_input = m.group(1).strip() if m else user_text.strip()
+
+        messages = []
+        if system_instruction:
+            messages.append({"role": "system", "content": system_instruction})
+        messages.extend(FEW_SHOT_TURNS)
+        messages.append({"role": "user", "content": f'Transcribe and clean this dictation: "{clean_input}"'})
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/sarawgiapoorv/GlideText",
+            "X-Title": "GlideText",
+        }
+        candidates = ["openrouter/auto", "meta-llama/llama-3.3-70b-instruct:free", "google/gemini-2.0-flash-exp:free"]
+        for cand in candidates:
+            payload = {
+                "model": cand,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+            t0 = time.time()
+            try:
+                resp = self._session.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    timeout=timeout,
+                )
+                elapsed_ms = int((time.time() - t0) * 1000)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    raw = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                    if raw:
+                        cleaned = LocalLLMEngine._clean_model_output(raw, raw_text=clean_input)
+                        self.vault.log_api_call("OpenRouter", cand, "SUCCESS", elapsed_ms)
+                        logging.info(f"[AIBrain] OpenRouter Polish OK in {elapsed_ms}ms model='{cand}': {repr(cleaned)}")
+                        return cleaned
+                elif resp.status_code in (429, 503):
+                    logging.warning(f"[OpenRouter] Rate limited ({resp.status_code}) on {cand}")
+                    continue
+                else:
+                    logging.warning(f"[OpenRouter] HTTP {resp.status_code} on {cand}: {resp.text[:150]}")
+            except Exception as e:
+                logging.warning(f"[OpenRouter] Error on {cand}: {e}")
+        return None
+
     # ------------------------------------------------------------------
     # Internal: Make a Gemini API call with retry logic
     # ------------------------------------------------------------------
@@ -631,6 +696,10 @@ class AIBrain:
         Automatically rotates to the next API key on 429 rate limits.
         Returns the text response, or None on failure.
         """
+        # Auto-detect OpenRouter key format
+        if self.api_key and self.api_key.startswith("sk-or-"):
+            return self._call_openrouter(system_instruction, contents, temperature, max_tokens, timeout)
+
         payload = {
             "systemInstruction": {
                 "parts": [{"text": system_instruction}]
@@ -798,18 +867,33 @@ class AIBrain:
 
         # Shared few-shot calibration turns (passive dictation only)
         FREELLMAPI_FEW_SHOT: list[dict] = [
-            {"role": "user",      "content": 'Transcribe and clean this dictation: "order me a pizza from dominos"'},
-            {"role": "assistant", "content": "Order me a pizza from Domino's."},
-            {"role": "user",      "content": 'Transcribe and clean this dictation: "what is the distance to the moon"'},
-            {"role": "assistant", "content": "What is the distance to the Moon?"},
+            # 1. Filler removal + capitalization + punctuation
+            {"role": "user",      "content": 'Transcribe and clean this dictation: "um so basically we need to uh ship this by friday"'},
+            {"role": "assistant", "content": "We need to ship this by Friday."},
+            # 2. Stutter and repeated words
+            {"role": "user",      "content": 'Transcribe and clean this dictation: "can we can we schedule a call for for tomorrow"'},
+            {"role": "assistant", "content": "Can we schedule a call for tomorrow?"},
+            # 3. Speech-to-mind self-correction
             {"role": "user",      "content": 'Transcribe and clean this dictation: "order from dominos no wait make it pizza hut"'},
             {"role": "assistant", "content": "Make it Pizza Hut."},
+            {"role": "user",      "content": 'Transcribe and clean this dictation: "send the invoice to mark no actually send it to sarah"'},
+            {"role": "assistant", "content": "Send the invoice to Sarah."},
+            {"role": "user",      "content": 'Transcribe and clean this dictation: "let us meet at 5 actually 6:30 pm"'},
+            {"role": "assistant", "content": "Let's meet at 6:30 PM."},
+            # 4. Questions (preserve question, do NOT answer)
+            {"role": "user",      "content": 'Transcribe and clean this dictation: "what is the time in new york right now like you know"'},
+            {"role": "assistant", "content": "What is the time in New York right now?"},
+            {"role": "user",      "content": 'Transcribe and clean this dictation: "how far is the moon from the earth"'},
+            {"role": "assistant", "content": "How far is the moon from the Earth?"},
+            {"role": "user",      "content": 'Transcribe and clean this dictation: "how do i reset my password on gmail"'},
+            {"role": "assistant", "content": "How do I reset my password on Gmail?"},
+            # 5. Imperative commands (preserve command, do NOT execute)
+            {"role": "user",      "content": 'Transcribe and clean this dictation: "order me a large pepperoni pizza from dominos"'},
+            {"role": "assistant", "content": "Order me a large pepperoni pizza from Domino's."},
+            {"role": "user",      "content": 'Transcribe and clean this dictation: "search for flights to london for next weekend"'},
+            {"role": "assistant", "content": "Search for flights to London for next weekend."},
             {"role": "user",      "content": 'Transcribe and clean this dictation: "write a python function to add two numbers"'},
             {"role": "assistant", "content": "Write a Python function to add two numbers."},
-            {"role": "user",      "content": 'Transcribe and clean this dictation: "send message to bob no wait send to alice"'},
-            {"role": "assistant", "content": "Send to Alice."},
-            {"role": "user",      "content": 'Transcribe and clean this dictation: "what time is it in london"'},
-            {"role": "assistant", "content": "What time is it in London?"},
         ]
 
         messages: list[dict] = []
