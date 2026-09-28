@@ -40,10 +40,11 @@ if not _logger.handlers:
     _file_handler.setFormatter(_file_formatter)
     _logger.addHandler(_file_handler)
     
-    _stream_handler = logging.StreamHandler(sys.stdout)
-    _stream_formatter = logging.Formatter('%(message)s')
-    _stream_handler.setFormatter(_stream_formatter)
-    _logger.addHandler(_stream_handler)
+    if sys.stdout is not None:
+        _stream_handler = logging.StreamHandler(sys.stdout)
+        _stream_formatter = logging.Formatter('%(message)s')
+        _stream_handler.setFormatter(_stream_formatter)
+        _logger.addHandler(_stream_handler)
 
 def set_thread_priority(priority_level: int):
     """Set the calling thread's priority on Windows.
@@ -174,7 +175,7 @@ def _read_config():
 
 
 def _write_config(api_key: str, device_index):
-    """Write api_key to keyring and device_index to config.txt."""
+    """Write api_key to keyring and device_index to line 1 of config.txt while preserving all other lines."""
     config_path = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "config.txt"
     )
@@ -195,11 +196,21 @@ def _write_config(api_key: str, device_index):
         except Exception as e:
             logging.error(f"[Config] Failed to write to keyring: {e}")
 
-    # Store device index plainly
+    # Store device index on line 1, preserving all subsequent KEY=VALUE lines
     try:
         dev_str = str(device_index) if device_index is not None else ""
+        existing_lines = []
+        if os.path.isfile(config_path):
+            with open(config_path, "r", encoding="utf-8") as f:
+                existing_lines = f.read().splitlines()
+
+        if existing_lines:
+            new_lines = [dev_str] + existing_lines[1:]
+        else:
+            new_lines = [dev_str]
+
         with open(config_path, "w", encoding="utf-8") as f:
-            f.write(f"{dev_str}\n")
+            f.write("\n".join(new_lines) + "\n")
     except Exception as e:
         logging.error(f"[Config] Failed to write config.txt: {e}")
 
@@ -764,7 +775,7 @@ class GlideTextApp(ctk.CTk):
             "transcribing": (C.AMBER,    "TRANSCRIBING",      "Transcribing speech locally..."),
             "processing":   (C.AMBER,    "PROCESSING",        "Polishing text with AI..."),
             "typing":       (C.ACCENT,   "TYPING",            "Injecting text at cursor..."),
-            "initializing": (C.TEXT_DIM, "INITIALIZING...",   "Connecting to Gemini cloud..."),
+            "initializing": (C.TEXT_DIM, "INITIALIZING...",   "Initializing speech engine..."),
             "warning":      (C.AMBER,    "WARNING",           ""),
             "error":        (C.RED,      "ERROR",             ""),
         }
@@ -905,8 +916,22 @@ class GlideTextApp(ctk.CTk):
         # Pre-warm connection in background
         threading.Thread(target=self.brain.pre_warm_gemini_connection, daemon=True).start()
 
-    def _capture_lookback_context(self) -> str:
+    def _capture_lookback_context(self, context_info: dict | None = None) -> str:
         """Selects the preceding ~5-8 words using Ctrl+Shift+Left 6 times, copies, and restores the cursor."""
+        # Flag check: LOOKBACK_CONTEXT=0 by default
+        cfg = _read_config()
+        lookback_enabled = os.getenv("LOOKBACK_CONTEXT", str(cfg.get("lookback_context", 0))).strip() == "1"
+        if not lookback_enabled:
+            return ""
+
+        # Skip for terminals
+        if context_info:
+            app_hint = context_info.get("app_hint", "").lower()
+            exe_name = context_info.get("exe_name", "").lower()
+            if any(term in app_hint or term in exe_name for term in ["terminal", "cmd", "powershell", "bash", "wsl"]):
+                logging.info("[Lookback] Terminal active -- skipping lookback context capture.")
+                return ""
+
         import pyperclip
         import keyboard
         import time
@@ -1117,8 +1142,13 @@ class GlideTextApp(ctk.CTk):
             return
         
         is_autoboot = self.autoboot_switch.get() == 1
+        exe = sys.executable
+        if exe.lower().endswith("python.exe"):
+            pythonw_exe = exe[:-10] + "pythonw.exe"
+        else:
+            pythonw_exe = exe
         main_py_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "main.py"))
-        cmd_string = f'pythonw.exe "{main_py_path}" --silent'
+        cmd_string = f'"{pythonw_exe}" "{main_py_path}" --silent'
         
         try:
             key = winreg.OpenKey(
@@ -1127,26 +1157,24 @@ class GlideTextApp(ctk.CTk):
                 0, 
                 winreg.KEY_SET_VALUE
             )
+            # Always clean up legacy LocalFlow registry key
+            try:
+                winreg.DeleteValue(key, "LocalFlow")
+            except FileNotFoundError:
+                pass
+
             if is_autoboot:
                 winreg.SetValueEx(key, "GlideText", 0, winreg.REG_SZ, cmd_string)
-                logging.info("[Registry] Set GlideText to run on boot.")
-                # Clean up legacy registry key if present
-                try:
-                    winreg.DeleteValue(key, "LocalFlow")
-                except FileNotFoundError:
-                    pass
+                logging.info(f"[Registry] Set GlideText autoboot: {cmd_string}")
             else:
                 try:
                     winreg.DeleteValue(key, "GlideText")
                     logging.info("[Registry] Removed GlideText from boot.")
                 except FileNotFoundError:
                     pass
-                try:
-                    winreg.DeleteValue(key, "LocalFlow")
-                except FileNotFoundError:
-                    pass
             winreg.CloseKey(key)
         except Exception as e:
+            logging.error(f"[Registry] Failed to update autoboot status: {e}")
             logging.error(f"[Registry] Failed to modify boot settings: {e}")
 
     def _apply_settings(self):
@@ -1163,32 +1191,23 @@ class GlideTextApp(ctk.CTk):
             return
 
         self.recorder.device_index = new_device
+        self._on_style_change(self.style_menu.get())
 
         # Gemini API Key (supports comma-separated multi-keys)
         new_key = self.api_key_entry.get().strip()
-        # If the input field is left empty (or shows the bullet placeholder), preserve the currently configured key
-        if not new_key and self.brain.api_key:
-            # Preserve current keys — build comma-separated string from internal list
-            new_key = ",".join(self.brain._api_keys) if self.brain._api_keys else ""
-
         if new_key:
             self.brain.set_api_key(new_key)
-            _write_config(new_key, new_device)
-            # Update the masked placeholder and securely purge typed plaintext from the UI widget memory
-            key_count = len(self.brain._api_keys)
             self.api_key_entry.configure(placeholder_text="••••••••••••••••")
             self.api_key_entry.delete(0, 'end')
-            self._set_status("ready")
-            self.settings_feedback.configure(
-                text=f"Settings applied! {key_count} API key(s) saved.",
-                text_color=C.GREEN,
-            )
-        else:
-            self.settings_feedback.configure(
-                text="Please enter a Gemini API Key",
-                text_color=C.AMBER,
-            )
-            return
+
+        current_key = ",".join(self.brain._api_keys) if getattr(self.brain, "_api_keys", None) else ""
+        _write_config(current_key, new_device)
+        self._set_status("ready")
+
+        self.settings_feedback.configure(
+            text="Settings saved successfully!",
+            text_color=C.GREEN,
+        )
 
         self.after(
             4000,
@@ -1324,9 +1343,9 @@ class GlideTextApp(ctk.CTk):
     # ==================================================================
 
     def _initialize_backend(self):
-        """Initialize Gemini connection and register hotkeys."""
-        # Stage 1 -- Check API key
-        self._set_status("initializing", "Connecting to Gemini cloud...")
+        """Initialize speech engine and register hotkeys."""
+        # Stage 1 -- Check speech engine
+        self._set_status("initializing", "Initializing speech engine...")
         self.brain.load_whisper()
 
         # Stage 2 -- System tray
@@ -1352,15 +1371,9 @@ class GlideTextApp(ctk.CTk):
             self._set_status("error", f"Hotkey setup failed: {e}")
             return
 
-        # Stage 4 -- Set status based on API key presence
-        if self.brain.is_ready:
-            self._set_status("ready")
-            self.recorder.warmup()
-        else:
-            self._set_status(
-                "error",
-                "Please enter your Gemini API Key in Settings",
-            )
+        # Stage 4 -- Set status to ready
+        self._set_status("ready")
+        self.recorder.warmup()
 
         # Keep this thread alive so keyboard hooks remain active
         try:
@@ -1375,27 +1388,15 @@ class GlideTextApp(ctk.CTk):
         if self.is_continuous_mode:
             return
 
-        if not self.brain.api_key:
-            from tkinter import messagebox
-            messagebox.showerror(
-                "Gemini API Key Missing",
-                "Gemini API Key is missing.\n\n"
-                "Please configure a valid API key in Settings.\n"
-                "Tip: You can paste multiple keys separated by commas for auto-rotation."
-            )
-            return
-
         with self._lock:
             if self.recorder.is_recording or getattr(self, "_is_starting_recording", False) or self._is_processing:
                 return
             self._is_starting_recording = True
             self._stop_pending = False
 
-        # Capture lookback context immediately on key press (before speaking starts)
-        self._lookback_context = self._capture_lookback_context()
-
-        # Trigger TCP/TLS socket pre-warming in a background thread
-        threading.Thread(target=self.brain.pre_warm_gemini_connection, daemon=True).start()
+        # Trigger TCP/TLS socket pre-warming in a background thread if key available
+        if self.brain.api_key:
+            threading.Thread(target=self.brain.pre_warm_gemini_connection, daemon=True).start()
 
         # Optimistic UI update
         self._set_status("recording")
@@ -1410,14 +1411,16 @@ class GlideTextApp(ctk.CTk):
                 self.recorder.start()
                 if not self.recorder.is_recording:
                     raise RuntimeError("Audio stream failed to initialize")
-                
+
+                # Capture lookback context AFTER recording starts (and on background thread)
+                self._lookback_context = self._capture_lookback_context(context)
+
                 with self._lock:
                     if self._stop_pending:
                         self._stop_pending = False
                         self._async_stop()
             except Exception as e:
                 logging.error(f"[GUI] Recording start error: {e}")
-                self._is_streaming_active = False
                 self._set_status("warning", f"Recording failed: {e}")
                 self.after(3000, lambda: self._set_status("ready"))
             finally:
@@ -1480,16 +1483,6 @@ class GlideTextApp(ctk.CTk):
                 self.after(3000, lambda: self._set_status("ready"))
         else:
             # START continuous session
-            if not self.brain.api_key:
-                from tkinter import messagebox
-                messagebox.showerror(
-                    "Gemini API Key Missing",
-                    "Gemini API Key is missing.\n\n"
-                    "Please configure a valid API key in Settings.\n"
-                    "Tip: You can paste multiple keys separated by commas for auto-rotation."
-                )
-                return
-
             if self.recorder.is_recording:
                 return
 
@@ -1497,11 +1490,10 @@ class GlideTextApp(ctk.CTk):
             self.is_continuous_mode = True
             self._is_starting_recording = True
 
-            # Capture lookback context immediately on continuous start (before speaking starts)
-            self._lookback_context = self._capture_lookback_context()
+            context = get_active_window_info()
 
-            # Trigger TCP/TLS socket pre-warming in a background thread
-            threading.Thread(target=self.brain.pre_warm_gemini_connection, daemon=True).start()
+            if self.brain.api_key:
+                threading.Thread(target=self.brain.pre_warm_gemini_connection, daemon=True).start()
 
             # Optimistic UI update
             self._set_status("recording", "Continuous mode ON -- will auto-stop on silence")
@@ -1512,6 +1504,9 @@ class GlideTextApp(ctk.CTk):
                     self.recorder.start(auto_stop_callback=self._on_vad_auto_stop)
                     if not self.recorder.is_recording:
                         raise RuntimeError("Audio stream failed to initialize")
+
+                    # Capture lookback context AFTER recording starts (and on background thread)
+                    self._lookback_context = self._capture_lookback_context(context)
                 except Exception as e:
                     logging.error(f"[GUI] Continuous recording start error: {e}")
                     self.is_continuous_mode = False
@@ -1598,6 +1593,9 @@ class GlideTextApp(ctk.CTk):
         """Full dictation pipeline: transcribe -> polish -> inject."""
         with self._lock:
             if self._is_processing:
+                logging.info("[GUI] Pipeline busy, re-queuing audio task...")
+                self._pipeline_queue.put((audio_path, context))
+                time.sleep(0.1)
                 return
             self._is_processing = True
 

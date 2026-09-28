@@ -203,7 +203,13 @@ class LocalLLMEngine:
             logging.error("[LocalLLM] Cannot run polish: Ollama server is unavailable.")
             return None
 
-        effective_system = LOCAL_SYSTEM_PROMPT
+        if system_prompt and system_prompt.strip():
+            if "PASSIVE KEYBOARD REPLACEMENT" in system_prompt or "Wispr Flow" in system_prompt or "EDITOR_SYSTEM_PROMPT" in system_prompt:
+                effective_system = system_prompt
+            else:
+                effective_system = f"{LOCAL_SYSTEM_PROMPT}\n\n{system_prompt}"
+        else:
+            effective_system = LOCAL_SYSTEM_PROMPT
 
         messages = [{"role": "system", "content": effective_system}]
         messages.extend(FEW_SHOT_TURNS)
@@ -443,6 +449,8 @@ class LocalLLMEngine:
         # ── 4. Informational / explanation prefixes ──────────────────────────
 
         informational_prefixes = [
+            "here is the polished text:",
+            "here's the polished text:",
             "here is the corrected text:",
             "here's the corrected text:",
             "here is the cleaned text:",
@@ -543,28 +551,34 @@ class LocalLLMEngine:
             "step 1",
             "1.",
         ]
-        if raw_text and any(lower.startswith(bp) for bp in chatbot_answer_patterns):
-            # Extra check: make sure the raw text itself doesn't start with
-            # the same phrase (user might have genuinely said "Here are some")
-            raw_lower = raw_text.strip().lower()
-            if not any(raw_lower.startswith(bp) for bp in chatbot_answer_patterns):
-                logging.warning(
-                    f"[LocalLLM] Chatbot-answer guard triggered: {repr(cleaned[:80])}. "
-                    "Model is answering/executing instead of polishing. "
-                    "Returning safe transcription of raw text."
+        if raw_text:
+            raw_first_5 = " ".join(raw_text.strip().lower().split()[:5])
+            matched_pattern = None
+            for bp in chatbot_answer_patterns:
+                if bp == "1.":
+                    if re.match(r'^1\.(?!\d)\s*', lower):
+                        matched_pattern = "1."
+                        break
+                elif lower.startswith(bp):
+                    matched_pattern = bp.strip()
+                    break
+
+            if matched_pattern:
+                # Check if raw text contains the same phrase anywhere in its first ~5 words
+                # (e.g. user dictated "1.5 million" or "you can do that" or "first, clean this up")
+                pattern_words = matched_pattern.lower().rstrip(".,!?").split()
+                has_match = (
+                    matched_pattern.lower() in raw_first_5
+                    or (pattern_words and " ".join(pattern_words) in raw_first_5)
+                    or (len(pattern_words) >= 2 and any(" ".join(pattern_words[i:i+2]) in raw_first_5 for i in range(len(pattern_words)-1)))
                 )
-                raw_stripped = raw_text.strip()
-                first_words = raw_stripped.lower().split()[:2]
-                is_q = any(
-                    w in first_words
-                    for w in ["what", "how", "who", "where", "when", "why",
-                              "can", "could", "is", "are", "does", "did", "will", "would"]
-                )
-                if is_q and not raw_stripped.endswith("?"):
-                    return raw_stripped + "?"
-                if not raw_stripped.endswith((".", "!", "?")):
-                    return raw_stripped + "."
-                return raw_stripped
+                if not has_match:
+                    logging.warning(
+                        f"[LocalLLM] Chatbot-answer guard triggered: {repr(cleaned[:80])}. "
+                        "Model is answering/executing instead of polishing. "
+                        "Returning safe transcription of raw text."
+                    )
+                    return LocalLLMEngine.format_lightly_punctuated_raw(raw_text)
 
         # ── 6. Trailing explanatory suffix guard ─────────────────────────────
         # Some models append "Note: ..." or "(As an AI, ...)" after the transcription.

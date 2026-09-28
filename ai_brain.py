@@ -551,8 +551,8 @@ class AIBrain:
 
     @property
     def is_ready(self) -> bool:
-        """Return True when at least one API key is configured."""
-        return bool(self._api_keys)
+        """Return True when the dictation pipeline is ready."""
+        return True
 
     # ------------------------------------------------------------------
     # Dynamic Dictionary
@@ -592,7 +592,7 @@ class AIBrain:
         """Print startup status (legacy compatibility method name)."""
         logging.info("[AIBrain] Initialising cloud transcription pipeline...")
         if not self.api_key:
-            logging.warning("[AIBrain] WARNING: No API key found -- transcription unavailable.")
+            logging.info("[AIBrain] Note: No Gemini API key found -- local ASR & FreeLLMAPI/Ollama will handle dictation.")
             return
         logging.info(f"[AIBrain] Primary model  : {GEMINI_MODELS[0]}")
         logging.info(f"[AIBrain] Fallback models: {GEMINI_MODELS[1:]}")
@@ -604,15 +604,15 @@ class AIBrain:
 
     def pre_warm_gemini_connection(self) -> None:
         """Pre-warm DNS and TLS handshake with Gemini API endpoints by doing a fast lightweight request."""
-        if not self.api_key:
+        if not self.api_key or self.api_key.startswith("sk-or-") or getattr(self, "_gemini_prewarmed", False):
             return
+        self._gemini_prewarmed = True
         try:
-            # Perform a lightweight GET request to warm up TCP/TLS connection
-            url = f"{GEMINI_API_BASE}?key={self.api_key}"
-            self._session.get(url, timeout=3.0)
+            headers = {"x-goog-api-key": self.api_key}
+            self._session.get(GEMINI_API_BASE, headers=headers, timeout=3.0)
             logging.info("[AIBrain] TCP/TLS connection pre-warmed successfully.")
         except Exception as e:
-            logging.info(f"[AIBrain] TCP/TLS pre-warm failed: {e}")
+            logging.info(f"[AIBrain] TCP/TLS pre-warm failed: {_sanitize_log(str(e))}")
 
     def _call_openrouter(
         self,
@@ -641,7 +641,7 @@ class AIBrain:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/sarawgiapoorv/GlideText",
+            "HTTP-Referer": "https://github.com/sarawgiapoorv/LOCALFLOW",
             "X-Title": "GlideText",
         }
         candidates = ["openrouter/auto", "meta-llama/llama-3.3-70b-instruct:free", "google/gemini-2.0-flash-exp:free"]
@@ -673,9 +673,9 @@ class AIBrain:
                     logging.warning(f"[OpenRouter] Rate limited ({resp.status_code}) on {cand}")
                     continue
                 else:
-                    logging.warning(f"[OpenRouter] HTTP {resp.status_code} on {cand}: {resp.text[:150]}")
+                    logging.warning(_sanitize_log(f"[OpenRouter] HTTP {resp.status_code} on {cand}: {resp.text[:150]}"))
             except Exception as e:
-                logging.warning(f"[OpenRouter] Error on {cand}: {e}")
+                logging.warning(_sanitize_log(f"[OpenRouter] Error on {cand}: {e}"))
         return None
 
     # ------------------------------------------------------------------
@@ -712,12 +712,15 @@ class AIBrain:
         }
 
         for attempt in range(1, MAX_RETRIES + 1):
-            # Build URL with the current active key (may change after rotation)
-            url = f"{GEMINI_API_BASE}/{model}:generateContent?key={self.api_key}"
+            url = f"{GEMINI_API_BASE}/{model}:generateContent"
+            headers = {
+                "Content-Type": "application/json",
+                "x-goog-api-key": self.api_key,
+            }
             provider_label = f"Gemini (Slot {self._current_key_index})"
             t0 = time.time()
             try:
-                resp = self._session.post(url, json=payload, timeout=timeout)
+                resp = self._session.post(url, json=payload, headers=headers, timeout=timeout)
                 elapsed_ms = int((time.time() - t0) * 1000)
 
                 # Handle rate limits: rotate key first, then retry
@@ -765,13 +768,13 @@ class AIBrain:
                     time.sleep(RETRY_BACKOFF)
             except requests.ConnectionError as e:
                 elapsed_ms = int((time.time() - t0) * 1000)
-                logging.error(f"[AIBrain] {model} connection error: {e}")
+                logging.error(_sanitize_log(f"[AIBrain] {model} connection error: {e}"))
                 self.vault.log_api_call(provider_label, model, "CONNECTION_ERROR", elapsed_ms)
                 if attempt < MAX_RETRIES:
                     time.sleep(RETRY_BACKOFF)
             except Exception as e:
                 elapsed_ms = int((time.time() - t0) * 1000)
-                logging.error(f"[AIBrain] {model} unexpected error: {e}")
+                logging.error(_sanitize_log(f"[AIBrain] {model} unexpected error: {e}"))
                 self.vault.log_api_call(provider_label, model, "ERROR", elapsed_ms)
                 break  # Don't retry unknown errors
 
@@ -941,14 +944,18 @@ class AIBrain:
             models_to_try.append("auto")
 
         connection_failed = False
+        last_status_code = None
+        tier1_start_time = time.time()
+        TIER1_TOTAL_TIME_BUDGET = 8.0  # Cap total Tier 1 budget to ~8 seconds across all attempts
 
-        def _attempt(try_model: str) -> str | None:
-            nonlocal connection_failed
+        def _attempt(try_model: str, req_timeout: float) -> str | None:
+            nonlocal connection_failed, last_status_code
             payload = _build_payload(try_model)
             t0 = time.time()
             try:
-                resp = self._session.post(endpoint, json=payload, headers=headers, timeout=timeout)
+                resp = self._session.post(endpoint, json=payload, headers=headers, timeout=req_timeout)
                 elapsed_ms = int((time.time() - t0) * 1000)
+                last_status_code = resp.status_code
 
                 # Rate limit (429) or Service Unavailable (503)
                 if resp.status_code in (429, 503):
@@ -1049,15 +1056,35 @@ class AIBrain:
                 self.vault.log_api_call(provider_label, try_model, "ERROR", elapsed_ms)
                 return None
 
-        for candidate_model in models_to_try:
-            if candidate_model != models_to_try[0]:
-                logging.info(f"[FreeLLMAPI] Retrying with model='{candidate_model}'...")
-            result = _attempt(candidate_model)
+        idx = 0
+        while idx < len(models_to_try):
+            candidate_model = models_to_try[idx]
+            elapsed_total = time.time() - tier1_start_time
+            remaining = TIER1_TOTAL_TIME_BUDGET - elapsed_total
+            if remaining <= 0.3:
+                logging.warning(f"[FreeLLMAPI] Total Tier 1 time budget (~8s) reached ({elapsed_total:.1f}s elapsed). Yielding to Tier 2.")
+                break
+
+            current_timeout = min(float(timeout), max(0.5, remaining))
+            if idx > 0:
+                logging.info(f"[FreeLLMAPI] Retrying with model='{candidate_model}' (budget remaining: {remaining:.1f}s)...")
+
+            result = _attempt(candidate_model, current_timeout)
             if result is not None:
                 return result
             if connection_failed:
                 logging.info("[FreeLLMAPI] Server is offline or booting; skipping further model fallbacks.")
                 return None
+
+            # On 400/404/422 for "auto", fetch real available models from /v1/models and append
+            if candidate_model == "auto" and last_status_code in (400, 404, 422):
+                logging.info("[FreeLLMAPI] 'auto' returned HTTP 400/404/422. Fetching available models via /v1/models...")
+                available = self._fetch_freellmapi_models()
+                for am in available:
+                    if am not in models_to_try:
+                        models_to_try.append(am)
+
+            idx += 1
 
         logging.warning(
             f"[FreeLLMAPI] All model attempt(s) exhausted. "
@@ -1308,6 +1335,7 @@ class AIBrain:
 
 
         if freellm_res:
+            self._consecutive_online_failures = 0
             logging.info(f"[AIBrain] Tier 1 Polish succeeded with FreeLLMAPI ({FREELLMAPI_DEFAULT_MODEL})")
             return freellm_res
         logging.info("[AIBrain] FreeLLMAPI unavailable or failed. Falling back to Tier 2 (Direct Gemini Cloud)...")
@@ -1326,41 +1354,48 @@ class AIBrain:
                     timeout=REQUEST_TIMEOUT,
                 )
                 if result is not None:
+                    self._consecutive_online_failures = 0
                     logging.info(f"[AIBrain] Tier 2 Polish succeeded with Gemini model {model}")
                     return result
                 logging.info(f"[AIBrain] {model} polish failed, trying next...")
         else:
-            logging.warning(
-                "[AIBrain] Tier 2 SKIPPED: No Gemini API key is configured. "
-                "Set one via the GUI Settings or store in Windows Credential Manager "
-                "under service='GlideText', username='api_key'. "
-                "This is why GlideText fell through to local Ollama."
-            )
+            logging.info("[AIBrain] Tier 2 SKIPPED: No Gemini API key is configured.")
 
-
-        # Tier 3 (Local Ollama Fallback): Circuit Breaker: Cloud & Proxy failed or unavailable -> Activate Sticky Local LLM
+        # Tier 3 (Local Ollama Fallback): Circuit Breaker
+        self._consecutive_online_failures = getattr(self, "_consecutive_online_failures", 0) + 1
         logging.warning(
-            f"[AIBrain] FreeLLMAPI and Gemini polish unavailable or exhausted. Activating sticky local LLM fallback ({self.local_engine.model})."
+            f"[AIBrain] Online polish tiers unavailable (consecutive failures: {self._consecutive_online_failures})."
         )
-        self._sticky_local_mode = True
-        if callable(self.on_mode_change):
-            try:
-                self.on_mode_change("local")
-            except Exception as e:
-                logging.warning(f"[AIBrain] Error in on_mode_change callback: {e}")
 
-        # Immediately recover the current sentence with Local LLM
-        t0 = time.time()
-        local_res = self.local_engine.polish(raw_text, system_prompt, temperature=temperature)
-        elapsed_ms = int((time.time() - t0) * 1000)
-        if local_res:
-            self.vault.log_api_call("Local LLM (Fallback)", self.local_engine.model, "SUCCESS", elapsed_ms)
-            logging.info(f"[AIBrain] Fallback to local {self.local_engine.model} succeeded: {repr(local_res)}")
-            return local_res
-        else:
-            self.vault.log_api_call("Local LLM (Fallback)", self.local_engine.model, "ERROR", elapsed_ms)
-            logging.error("[AIBrain] CRITICAL: Both cloud and local LLM failed -- returning raw text.")
-            return raw_text
+        ollama_available = self.local_engine.is_server_running() or self.local_engine.ensure_server_running()
+
+        if ollama_available:
+            if self._consecutive_online_failures >= 2:
+                if not self._sticky_local_mode:
+                    logging.warning(
+                        f"[AIBrain] 2+ consecutive online failures. Activating sticky local LLM fallback ({self.local_engine.model})."
+                    )
+                    self._sticky_local_mode = True
+                    if callable(self.on_mode_change):
+                        try:
+                            self.on_mode_change("local")
+                        except Exception as e:
+                            logging.warning(f"[AIBrain] Error in on_mode_change callback: {e}")
+
+            t0 = time.time()
+            local_res = self.local_engine.polish(raw_text, system_prompt, temperature=temperature)
+            elapsed_ms = int((time.time() - t0) * 1000)
+            if local_res:
+                self.vault.log_api_call("Local LLM (Fallback)", self.local_engine.model, "SUCCESS", elapsed_ms)
+                logging.info(f"[AIBrain] Fallback to local {self.local_engine.model} succeeded: {repr(local_res)}")
+                return local_res
+            else:
+                self.vault.log_api_call("Local LLM (Fallback)", self.local_engine.model, "ERROR", elapsed_ms)
+
+        # If Ollama is unavailable or failed: return lightly-punctuated raw text without setting sticky mode
+        raw_fallback = LocalLLMEngine.format_lightly_punctuated_raw(raw_text)
+        logging.warning(f"[AIBrain] All polish tiers failed/unavailable. Returning lightly-punctuated raw text: {repr(raw_fallback)}")
+        return raw_fallback
 
     # ------------------------------------------------------------------
     # Full pipeline: Transcribe -> Edit Commands -> Polish
