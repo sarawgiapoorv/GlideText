@@ -1,0 +1,2 @@
+0
+FREELLMAPI_DIR=C:\path\to\your\freellmapi

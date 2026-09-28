@@ -1,7 +1,7 @@
 # Local configuration & credentials
 config.txt
-*.env
 .env
+*.env
 *.key
 .encryption-key
 
@@ -9,7 +9,9 @@ config.txt
 *.db
 *.db-journal
 *.db-wal
+*.db-shm
 localflow_history.db*
+glidetext_history.db*
 freeapi.db*
 
 # Python & editor cache
@@ -24,8 +26,13 @@ __pycache__/
 *.wav
 *.mp3
 test_audio.wav
-smoke_test.py
-test_suite.py
 
-# Logs
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Logs & diagnostic markers
 *.log
+crash_report.txt
+deps_ok
