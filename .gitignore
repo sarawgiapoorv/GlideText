@@ -1,12 +1,19 @@
 # Local configuration & credentials
 config.txt
 .env
+.env.*
+!.env.example
 *.env
 *.key
+*.pem
+credentials/
+secrets/
 .encryption-key
 
 # Databases & local state
 *.db
+*.sqlite
+*.sqlite3
 *.db-journal
 *.db-wal
 *.db-shm
@@ -16,8 +23,8 @@ freeapi.db*
 
 # Python & editor cache
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*$py.class
 .vs/
 .vscode/
 .idea/
@@ -31,8 +38,10 @@ test_audio.wav
 .venv/
 venv/
 env/
+ENV/
 
 # Logs & diagnostic markers
 *.log
 crash_report.txt
 deps_ok
+

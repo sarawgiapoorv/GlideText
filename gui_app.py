@@ -96,16 +96,20 @@ except ImportError:
 # Config helpers
 # ======================================================================
 
-def _read_config():
-    """Read config.txt and return a dict with api_key and device_index."""
+def _read_config() -> dict:
+    """Read config.txt and keyring and return configuration dictionary."""
     config_path = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "config.txt"
     )
-    result = {"api_key": "", "device_index": 0}
-    config_valid = True
-    config_missing_or_empty = False
-    
-    # Retrieve API key securely via keyring (check GlideText first, fall back to legacy LocalFlow)
+    result = {
+        "api_key": "",
+        "device_index": None,
+        "whisper_model": "base",
+        "whisper_language": "auto",
+        "freellmapi_dir": "",
+    }
+
+    # 1. Retrieve API key securely via keyring
     if HAS_KEYRING:
         try:
             key = keyring.get_password("GlideText", "api_key") or keyring.get_password("LocalFlow", "api_key")
@@ -114,103 +118,125 @@ def _read_config():
         except Exception as e:
             logging.error(f"[Config] Failed to read from keyring: {e}")
 
-    # Retrieve device index from config.txt
-    if not os.path.isfile(config_path):
-        config_missing_or_empty = True
-        config_valid = False
-    else:
+    # 2. Parse config.txt
+    if os.path.isfile(config_path):
         try:
             with open(config_path, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-            if not content:
-                config_missing_or_empty = True
-                config_valid = False
-            else:
-                lines = [line.strip() for line in content.splitlines()]
-                # Device index parsing
-                if len(lines) >= 1:
-                    val = lines[0]
-                    if val == "":
-                        result["device_index"] = 0
+                lines = [line.strip() for line in f.read().splitlines()]
+
+            for idx, line in enumerate(lines):
+                if not line or line.startswith("#"):
+                    continue
+                # Line 0 legacy standalone device index (e.g., "0" or "auto")
+                if idx == 0 and "=" not in line:
+                    if line.lower() in ("auto", "none", ""):
+                        result["device_index"] = None
                     else:
                         try:
-                            result["device_index"] = int(val)
+                            result["device_index"] = int(line)
                         except ValueError:
-                            result["device_index"] = 0
-                            config_valid = False
-                else:
-                    result["device_index"] = 0
-                    config_valid = False
+                            result["device_index"] = None
+                    continue
+
+                if "=" in line:
+                    key, val = line.split("=", 1)
+                    k_upper = key.strip().upper()
+                    v = val.strip()
+                    if k_upper == "DEVICE_INDEX":
+                        if v.lower() in ("auto", "none", ""):
+                            result["device_index"] = None
+                        else:
+                            try:
+                                result["device_index"] = int(v)
+                            except ValueError:
+                                result["device_index"] = None
+                    elif k_upper == "WHISPER_MODEL":
+                        result["whisper_model"] = v or "base"
+                    elif k_upper == "WHISPER_LANGUAGE":
+                        result["whisper_language"] = v or "auto"
+                    elif k_upper == "FREELLMAPI_DIR":
+                        result["freellmapi_dir"] = v
+                    elif k_upper == "GEMINI_API_KEY" and not result["api_key"]:
+                        result["api_key"] = v
         except Exception as e:
             logging.error(f"[Config] Failed to read config.txt: {e}")
-            config_valid = False
-
-    # If configuration is missing or invalid, we want to warn the user but fallback gracefully
-    if not config_valid:
-        try:
-            import tkinter as tk
-            from tkinter import messagebox
-            root = tk.Tk()
-            root.withdraw()
-            if config_missing_or_empty:
-                messagebox.showwarning(
-                    "Configuration Missing",
-                    "Configuration file (config.txt) was missing or empty.\n"
-                    "GlideText has created a new configuration file with default values (Device Index: 0)."
-                )
-            else:
-                messagebox.showwarning(
-                    "Configuration Corrupted",
-                    "Configuration file (config.txt) was improperly formatted.\n"
-                    "GlideText has restored default values (Device Index: 0)."
-                )
-            root.destroy()
-        except Exception as msg_err:
-            logging.error(f"[Config] Failed to show warning dialog: {msg_err}")
-
-        # Write the fallback values to restore stability
+    else:
+        # Create default config.txt if missing
         _write_config(result["api_key"], result["device_index"])
 
     return result
 
 
-def _write_config(api_key: str, device_index):
-    """Write api_key to keyring and device_index to line 1 of config.txt while preserving all other lines."""
+def _write_config(api_key: str, device_index, whisper_model: str = "base", whisper_language: str = "auto"):
+    """Write api_key to keyring and update config.txt preserving existing key-value pairs."""
     config_path = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "config.txt"
     )
-    # Store API key securely (supports comma-separated multi-keys)
+    # Store API key securely
     if HAS_KEYRING:
         try:
             if api_key:
                 keyring.set_password("GlideText", "api_key", api_key)
             else:
-                try:
-                    keyring.delete_password("GlideText", "api_key")
-                except Exception:
-                    pass
-                try:
-                    keyring.delete_password("LocalFlow", "api_key")
-                except Exception:
-                    pass
+                for service in ("GlideText", "LocalFlow"):
+                    try:
+                        keyring.delete_password(service, "api_key")
+                    except Exception:
+                        pass
         except Exception as e:
             logging.error(f"[Config] Failed to write to keyring: {e}")
 
-    # Store device index on line 1, preserving all subsequent KEY=VALUE lines
     try:
-        dev_str = str(device_index) if device_index is not None else ""
         existing_lines = []
         if os.path.isfile(config_path):
             with open(config_path, "r", encoding="utf-8") as f:
                 existing_lines = f.read().splitlines()
 
-        if existing_lines:
-            new_lines = [dev_str] + existing_lines[1:]
+        dev_val = "auto" if (device_index is None or str(device_index).lower() == "auto") else str(device_index)
+
+        # Check if line 0 was legacy format (no '=')
+        has_legacy_first_line = len(existing_lines) > 0 and "=" not in existing_lines[0] and not existing_lines[0].startswith("#")
+
+        seen_keys = set()
+        new_lines = []
+
+        if has_legacy_first_line:
+            new_lines.append(dev_val)
+            seen_keys.add("DEVICE_INDEX")
+            remaining_lines = existing_lines[1:]
         else:
-            new_lines = [dev_str]
+            remaining_lines = existing_lines
+
+        for line in remaining_lines:
+            stripped = line.strip()
+            if "=" in stripped and not stripped.startswith("#"):
+                k, _ = stripped.split("=", 1)
+                ku = k.strip().upper()
+                if ku == "DEVICE_INDEX":
+                    new_lines.append(f"DEVICE_INDEX={dev_val}")
+                    seen_keys.add("DEVICE_INDEX")
+                elif ku == "WHISPER_MODEL":
+                    new_lines.append(f"WHISPER_MODEL={whisper_model}")
+                    seen_keys.add("WHISPER_MODEL")
+                elif ku == "WHISPER_LANGUAGE":
+                    new_lines.append(f"WHISPER_LANGUAGE={whisper_language}")
+                    seen_keys.add("WHISPER_LANGUAGE")
+                else:
+                    new_lines.append(line)
+                    seen_keys.add(ku)
+            else:
+                new_lines.append(line)
+
+        if "DEVICE_INDEX" not in seen_keys:
+            if not has_legacy_first_line:
+                new_lines.insert(0, f"DEVICE_INDEX={dev_val}")
+        if "WHISPER_MODEL" not in seen_keys:
+            new_lines.append(f"WHISPER_MODEL={whisper_model}")
+        if "WHISPER_LANGUAGE" not in seen_keys:
+            new_lines.append(f"WHISPER_LANGUAGE={whisper_language}")
 
         with open(config_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(new_lines) + "\n")
+            f.write("\n".join(new_lines).strip() + "\n")
     except Exception as e:
         logging.error(f"[Config] Failed to write config.txt: {e}")
 
@@ -273,6 +299,11 @@ class GlideTextApp(ctk.CTk):
         self.recorder = AudioRecorder(device_index=self._cfg.get("device_index"))
         self.vault = HistoryVault()
         self.brain = AIBrain(vault=self.vault)
+        if self._cfg.get("whisper_model") or self._cfg.get("whisper_language"):
+            self.brain.set_whisper_config(
+                model_name=self._cfg.get("whisper_model", "base"),
+                language=self._cfg.get("whisper_language", "auto"),
+            )
         if self._cfg.get("api_key"):
             self.brain.set_api_key(self._cfg["api_key"])
         self.brain.on_mode_change = lambda mode: self.after(0, lambda: self._update_engine_mode_ui(mode))
@@ -421,10 +452,10 @@ class GlideTextApp(ctk.CTk):
 
         self.engine_badge = ctk.CTkLabel(
             self.engine_badge_frame,
-            text="● Cloud Polish",
+            text="● FreeLLMAPI (Priority 1)",
             font=(FONT, 11, "bold"),
-            text_color="#38bdf8",
-            fg_color="#0f172a",
+            text_color="#10b981",
+            fg_color="#064e3b",
             corner_radius=8,
             padx=10, pady=3,
         )
@@ -441,32 +472,56 @@ class GlideTextApp(ctk.CTk):
             corner_radius=6,
             command=self._on_reset_cloud_click,
         )
-        # Initially hidden in normal cloud mode
+        # Initially hidden in normal FreeLLMAPI mode
 
-    def _update_engine_mode_ui(self, mode: str):
-        """Update header badge reflecting active polish engine."""
+    def _update_engine_mode_ui(self, provider: str, is_fallback: bool = False):
+        """Update header badge reflecting active polish engine / provider."""
         try:
-            if mode == "local":
+            p_lower = str(provider).lower()
+            if "freellm" in p_lower:
                 self.engine_badge.configure(
-                    text="⚡ Local LLM (llama3.2:3b)",
+                    text="● FreeLLMAPI (Priority 1)",
+                    text_color="#10b981",
+                    fg_color="#064e3b"
+                )
+                self.reset_cloud_btn.pack_forget()
+            elif "gemini" in p_lower:
+                label = "● Gemini (Fallback)" if is_fallback else "● Gemini Cloud"
+                self.engine_badge.configure(
+                    text=label,
+                    text_color="#38bdf8",
+                    fg_color="#0f172a"
+                )
+                self.reset_cloud_btn.pack(side="left", padx=(6, 0))
+            elif "local" in p_lower or "ollama" in p_lower:
+                label = "⚡ Local LLM (Fallback)" if is_fallback else "⚡ Local LLM"
+                self.engine_badge.configure(
+                    text=label,
                     text_color="#fb923c",
                     fg_color="#431407"
                 )
                 self.reset_cloud_btn.pack(side="left", padx=(6, 0))
+            elif "raw" in p_lower or "fail" in p_lower:
+                self.engine_badge.configure(
+                    text="⚠ Raw Transcript (Fallback)",
+                    text_color="#f87171",
+                    fg_color="#450a0a"
+                )
+                self.reset_cloud_btn.pack(side="left", padx=(6, 0))
             else:
                 self.engine_badge.configure(
-                    text="● Cloud Polish",
-                    text_color="#38bdf8",
-                    fg_color="#0f172a"
+                    text=f"● {provider}",
+                    text_color="#94a3b8",
+                    fg_color="#1e293b"
                 )
                 self.reset_cloud_btn.pack_forget()
         except Exception:
             pass
 
     def _on_reset_cloud_click(self):
-        """User manually resets from sticky local mode back to Gemini cloud."""
+        """User manually resets temporary cooldowns back to FreeLLMAPI (Priority 1)."""
         self.brain.reset_cloud_mode()
-        self._update_engine_mode_ui("cloud")
+        self._update_engine_mode_ui("freellmapi")
         self._refresh_telemetry_ui()
 
     # -- Status Card --
@@ -570,6 +625,35 @@ class GlideTextApp(ctk.CTk):
         )
         self.style_menu.set("Normal")
         self.style_menu.pack(fill="x", pady=(4, 16))
+
+        # Speech-to-Text Whisper Model
+        ctk.CTkLabel(
+            inner, text="Whisper STT Model",
+            font=(FONT, 12), text_color=C.TEXT_SEC,
+        ).pack(anchor="w")
+        self.whisper_model_menu = ctk.CTkOptionMenu(
+            inner, values=["base", "tiny", "small", "medium", "large-v3"],
+            font=(FONT, 13), fg_color=C.BG_INPUT,
+            button_color=C.ACCENT, button_hover_color=C.ACCENT_HOVER,
+            text_color=C.TEXT, dropdown_fg_color=C.BG_CARD,
+            dropdown_text_color=C.TEXT, dropdown_hover_color=C.ACCENT,
+            height=34,
+        )
+        self.whisper_model_menu.set(self._cfg.get("whisper_model", "base"))
+        self.whisper_model_menu.pack(fill="x", pady=(4, 14))
+
+        # STT Language
+        ctk.CTkLabel(
+            inner, text="STT Language (auto, en, hi, es, fr, de...)",
+            font=(FONT, 12), text_color=C.TEXT_SEC,
+        ).pack(anchor="w")
+        self.whisper_lang_entry = ctk.CTkEntry(
+            inner, font=(FONT, 13), fg_color=C.BG_INPUT,
+            border_color=C.BORDER, text_color=C.TEXT, height=34,
+            placeholder_text="auto",
+        )
+        self.whisper_lang_entry.insert(0, self._cfg.get("whisper_language", "auto"))
+        self.whisper_lang_entry.pack(fill="x", pady=(4, 14))
 
         # Multi-key hint
         ctk.CTkLabel(
@@ -1201,7 +1285,17 @@ class GlideTextApp(ctk.CTk):
             self.api_key_entry.delete(0, 'end')
 
         current_key = ",".join(self.brain._api_keys) if getattr(self.brain, "_api_keys", None) else ""
-        _write_config(current_key, new_device)
+
+        # Whisper model and language
+        new_model = self.whisper_model_menu.get().strip() if hasattr(self, "whisper_model_menu") else "base"
+        new_lang = self.whisper_lang_entry.get().strip() if hasattr(self, "whisper_lang_entry") else "auto"
+        if not new_model:
+            new_model = "base"
+        if not new_lang:
+            new_lang = "auto"
+        self.brain.set_whisper_config(model_name=new_model, language=new_lang)
+
+        _write_config(current_key, new_device, whisper_model=new_model, whisper_language=new_lang)
         self._set_status("ready")
 
         self.settings_feedback.configure(
@@ -1394,6 +1488,10 @@ class GlideTextApp(ctk.CTk):
             self._is_starting_recording = True
             self._stop_pending = False
 
+        # Capture target window immediately at key-down
+        context = get_active_window_info()
+        self._target_hwnd = context.get("hwnd")
+
         # Trigger TCP/TLS socket pre-warming in a background thread if key available
         if self.brain.api_key:
             threading.Thread(target=self.brain.pre_warm_gemini_connection, daemon=True).start()
@@ -1402,7 +1500,6 @@ class GlideTextApp(ctk.CTk):
         self._set_status("recording")
 
         # Load dynamic vocabulary for the current active app in a background thread
-        context = get_active_window_info()
         self.brain.reload_vocabulary(context)
 
         def _async_start():
@@ -1445,8 +1542,11 @@ class GlideTextApp(ctk.CTk):
     def _async_stop(self):
         try:
             self._set_status("transcribing")
-            # Capture active window context IMMEDIATELY on stop trigger
+            # Capture active window context on stop trigger
             context = get_active_window_info()
+            if getattr(self, "_target_hwnd", None):
+                context["target_hwnd"] = self._target_hwnd
+            self._target_hwnd = None
             audio_path = self.recorder.stop()
             if audio_path is None:
                 self._set_status("ready")
@@ -1472,6 +1572,9 @@ class GlideTextApp(ctk.CTk):
             self.is_continuous_mode = False
             try:
                 context = get_active_window_info()
+                if getattr(self, "_target_hwnd", None):
+                    context["target_hwnd"] = self._target_hwnd
+                self._target_hwnd = None
                 audio_path = self.recorder.stop()
                 if audio_path is not None:
                     self._pipeline_queue.put((audio_path, context))
@@ -1491,6 +1594,7 @@ class GlideTextApp(ctk.CTk):
             self._is_starting_recording = True
 
             context = get_active_window_info()
+            self._target_hwnd = context.get("hwnd")
 
             if self.brain.api_key:
                 threading.Thread(target=self.brain.pre_warm_gemini_connection, daemon=True).start()
@@ -1522,6 +1626,9 @@ class GlideTextApp(ctk.CTk):
         self.is_continuous_mode = False
         if audio_path:
             context = get_active_window_info()
+            if getattr(self, "_target_hwnd", None):
+                context["target_hwnd"] = self._target_hwnd
+            self._target_hwnd = None
             self._pipeline_queue.put((audio_path, context))
         else:
             self._set_status("ready")
@@ -1622,14 +1729,24 @@ class GlideTextApp(ctk.CTk):
                 return
 
             # Stage 2: Pure Speech-to-Text Polish (Wispr Flow style)
-            # Never execute commands or keystrokes — ALWAYS convert spoken words into polished text.
+            # Priority 1: FreeLLMAPI -> Priority 2: Gemini -> Priority 3: Local LLM -> Raw transcript
             self._set_status("processing", "Polishing transcription...")
             pre_text = getattr(self, "_lookback_context", "")
             self._lookback_context = ""
-            polished_text = self.brain.polish(raw_text, style=self._active_style, context_info=context, pre_text=pre_text)
             
-            if not polished_text:
-                polished_text = raw_text
+            pipeline_res = self.brain.polish_with_provider_fallbacks(
+                raw_text=raw_text,
+                style=self._active_style,
+                context_info=context,
+                pre_text=pre_text,
+            )
+            polished_text = pipeline_res.text or raw_text
+
+            # Update engine mode badge to reflect the actual provider used
+            self.after(
+                0,
+                lambda p=pipeline_res.provider, fb=pipeline_res.is_fallback: self._update_engine_mode_ui(p, is_fallback=fb)
+            )
 
             polished_expanded = self.injector.expand_snippets(polished_text)
             normalized_polished = polished_expanded.strip().replace("\r\n", "\n")
@@ -1642,7 +1759,14 @@ class GlideTextApp(ctk.CTk):
 
             # Direct Injection: Type the polished text at the cursor position
             self._set_status("typing", "Typing polished text...")
-            self._last_injected_text = self.injector.inject(normalized_polished)
+            target_hwnd = context.get("target_hwnd") or context.get("hwnd")
+            inject_res = self.injector.inject(normalized_polished, target_hwnd=target_hwnd)
+
+            if inject_res.success:
+                self._last_injected_text = inject_res.injected_text
+            else:
+                logging.warning(f"[GUI] Text injection skipped or failed: {inject_res.error}")
+                self._set_status("warning", f"Injection: {inject_res.error}")
 
 
             # 4. Log final polished text to vault

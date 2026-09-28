@@ -111,6 +111,7 @@ def get_active_window_info() -> dict:
     try:
         user32 = ctypes.windll.user32
         hwnd = user32.GetForegroundWindow()
+        result["hwnd"] = hwnd
 
         # Window title
         length = user32.GetWindowTextLengthW(hwnd)

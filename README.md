@@ -1,54 +1,66 @@
 # GlideText 🎙️
 
-A privacy-first voice dictation tool for Windows — built as a personal, in-progress alternative to Wispr Flow (formerly named **LocalFlow**). Hold a hotkey, speak, and polished text is typed directly into whatever window is focused.
+A privacy-first voice dictation tool for Windows — built as an open, offline-capable alternative to Wispr Flow (formerly named **LocalFlow**). Hold a hotkey, speak, and polished text is typed directly into whatever window is focused.
 
 ---
 
-## Real Architecture
+## AI Architecture & Provider Priority
+
+GlideText strictly enforces a **3-tier AI polishing priority order**:
+
+1. **Priority 1 — FreeLLMAPI** (`127.0.0.1:3001` or configured endpoint)
+2. **Priority 2 — Gemini API** (Google Gemini cloud fallback)
+3. **Priority 3 — Local LLM** (Local Ollama models, e.g. `llama3.2:3b`)
+4. **Degraded Fallback — Raw Transcript** (Lightly punctuated raw text if all AI tiers fail)
+
+> **In Simple Terms:**
+> GlideText first tries **FreeLLMAPI**. If it is unavailable, it tries **Gemini**. If Gemini also fails, GlideText falls back to the **local LLM** on the computer. If all three fail, it types your raw speech transcript with basic punctuation so dictation never fails.
+
+### FreeLLMAPI Integration
+GlideText uses **FreeLLMAPI** as its primary LLM brain and routing layer.
+- **External Project Reference:** [FreeLLMAPI GitHub repository](https://github.com/tashfeenahmed/freellmapi?utm_source=chatgpt.com) *(FreeLLMAPI is an independent external open-source dependency)*.
+- **How FreeLLMAPI Works with GlideText:**
+  FreeLLMAPI gives GlideText a single local API endpoint that automatically routes requests to available free LLM providers and models, with automatic fallback when a specific provider is overloaded.
+- **GlideText's Role:**
+  In GlideText, your speech is first converted to text locally on your device. FreeLLMAPI then sends that text to an available LLM to clean up and polish the wording before GlideText types the final text into the active application.
+
+---
+
+## Core Pipeline
 
 1. **Local Speech-to-Text (Always On-Device)**  
-   Audio capture uses `sounddevice` (16 kHz, 16-bit PCM). Speech is transcribed locally using `faster-whisper` (`base.en`, int8 quantization). Your raw voice audio is transcribed entirely on-device and never leaves your machine.
+   Audio capture uses `sounddevice` (16 kHz, 16-bit PCM). Speech is transcribed locally using `faster-whisper` (default model `base`, language `auto`). Your raw audio is transcribed entirely on-device and never leaves your computer. Multilingual recognition (Hindi, Hinglish, Spanish, French, German, etc.) is fully supported.
 
-2. **3-Tier AI Polish Pipeline (Tried in Order)**  
-   Once text is transcribed, it is polished for grammar, punctuation, filler removal, and tone:
-   - **Tier 1 — FreeLLMAPI Proxy (`127.0.0.1:3001`):** A headless local proxy aggregating free LLM provider endpoints. Defaults to `model="auto"`, auto-queries `/v1/models` on HTTP 400/404/422 errors, and operates under a hard ~8-second budget cap.
-   - **Tier 2 — Direct Gemini API:** Uses `gemini-2.5-flash` with fallback to `gemini-2.0-flash`. The API key is sent via the `x-goog-api-key` header.
-   - **Tier 3 — Local Ollama:** Uses local models (`qwen2.5:3b`, `llama3.2:3b`) via Ollama's REST API (`127.0.0.1:11434`). If online tiers fail repeatedly (2+ consecutive failures), sticky local mode is activated. If Ollama is unavailable, GlideText falls back to lightly-punctuated raw text.
+2. **AI Text Polishing**  
+   The raw transcript is polished to fix grammatical errors, remove conversational filler ("um", "uh"), and apply the active tone style (Normal, Formal, Casual, Developer).
 
-3. **Keystroke Injection**  
-   Polished text is injected at your active cursor position via `keyboard`. In terminal windows (e.g. PowerShell, CMD, WSL), newlines are automatically sanitized to prevent accidental command execution.
-
----
-
-## Gemini Key is Optional
-
-A Gemini API key is **not required** to use GlideText:
-- Recording, local transcription, Tier 1 FreeLLMAPI polish, Tier 3 Ollama polish, and raw text fallbacks function completely without a Gemini key.
-- If provided, keys are validated only when typed and saved securely to Windows Credential Manager.
+3. **Safe Text Injection**  
+   - **Target Window Verification:** Verifies window focus against the target window captured when recording began, refusing injection if the user switched windows.
+   - **Unicode & Multiline Safety:** Single-line ASCII text types via `keyboard.write`; Unicode scripts (e.g. Hindi, Devanagari, emojis) and multiline text inject via Windows clipboard (`Ctrl+V`), immediately restoring your previous clipboard content in the background.
+   - **Terminal Guard:** In shell environments (PowerShell, CMD, Bash, WSL), unprompted newlines are stripped to prevent accidental command execution.
 
 ---
 
 ## Features
 
-- **Push-to-Talk & Continuous Mode:** Hold `Right Alt` to record and release to dictate, or press `Ctrl+Shift+A` for hands-free continuous dictation.
-- **Custom Voice Vocabulary:** Say "add Kubernetes to my dictionary" to append terms to `dictionary.json`.
-- **Context-Aware Dictionaries:** Automatically loads app-specific dictionaries (`dictionary_coding.json` for IDEs/terminals, `dictionary_slack.json` for communication apps) based on the focused window.
-- **Snippet Expansion:** Replaces keyword triggers defined in `snippets.json` (template provided with generic placeholders).
-- **Tone Profiles:** Normal, Formal, Casual, and Developer styles incorporated into system prompts across all tiers.
+- **Push-to-Talk & Continuous Mode:** Hold `Right Alt` to record and release to dictate, or press `Ctrl+Shift+A` for hands-free continuous dictation with Voice Activity Detection (VAD).
+- **Custom Voice Vocabulary:** Say "add Kubernetes to my dictionary" to append terms dynamically to your vocabulary dictionary.
+- **Context-Aware Dictionaries:** Automatically loads app-specific dictionaries (`dictionary_coding.json` for IDEs/terminals, `dictionary_slack.json` for messaging apps) based on the active window.
+- **Snippet Expansion:** Automatically expands shortcut triggers configured in `snippets.json`.
+- **Tone Profiles:** Normal, Formal, Casual, and Developer styles selectable from the UI.
 - **Output Cleaning & Anti-Chatbot Guards:**
-  - `_clean_model_output()` strips markdown fences, quote wrappers, conversational chatter (`"Sure!"`, `"Here is the polished text:"`), and trailing explanatory notes.
-  - Word-overlap and refusal guards prevent LLM chatbot responses or execution attempts, falling back to clean transcriptions.
-- **Lookback Context (Optional):** Controlled by `LOOKBACK_CONTEXT=0` (disabled by default). When set to `1`, inspects preceding words around the cursor, automatically skipped in terminal windows.
-- **Telemetry & History Vault:** Logs polish attempts, model tiers, and latency to a local SQLite database (`glidetext_history.db`), viewable in the Settings panel.
+  - Strips reasoning blocks (`<think>...</think>`), markdown code fences, and conversational preambles (`"Sure! Here is the text:"`).
+  - Guards against AI refusal chatter, ensuring you always get polished dictation text.
+- **Telemetry & History Vault:** Logs dictation history and latency to a local SQLite database (`glidetext_history.db`), securely viewable inside the Settings panel.
 
 ---
 
 ## Security & Privacy
 
 - **On-Device Audio:** Audio recordings are stored in temporary files (`%TEMP%\glidetext`) and transcribed locally. No raw audio is ever uploaded to external cloud servers.
-- **Text-Only Cloud Requests:** Only raw transcribed text (never audio) is sent to external or local LLM polish tiers.
-- **Credential Storage:** API keys live in Windows Credential Manager (`keyring`) or environment variables, never in source files or configuration logs.
-- **Log Sanitization:** All log output, exception tracebacks, and crash reports sanitize Gemini (`AIza...`), OpenRouter (`sk-or-...`), and FreeLLMAPI keys before writing to disk.
+- **Text-Only Requests:** Only transcribed text is sent to the configured text polish provider.
+- **Credential Storage:** API keys are stored securely in Windows Credential Manager (`keyring`), never in source files or repository commits.
+- **Log Sanitization:** All log outputs, exception tracebacks, and error messages redact API keys and bearer tokens.
 - **Git Hygiene:** Local configuration (`config.txt`), SQLite databases (`*.db`), logs (`*.log`), audio recordings (`*.wav`), `.venv/`, and diagnostic markers (`deps_ok`) are strictly `.gitignore`d.
 
 ---
@@ -58,23 +70,25 @@ A Gemini API key is **not required** to use GlideText:
 ### Requirements
 - Windows 10/11 (64-bit)
 - Python 3.10+
-- Optional: FreeLLMAPI directory (auto-discovered if placed on Desktop or configured in `config.txt`)
-- Optional: [Ollama](https://ollama.com/) with `ollama pull qwen2.5:3b` or `ollama pull llama3.2:3b`
+- Optional: Node.js (for running FreeLLMAPI locally)
+- Optional: [Ollama](https://ollama.com/) with `ollama pull llama3.2:3b`
 
-### Installation (Dedicated Virtual Environment)
+### Installation
 ```cmd
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\pip.exe install -r requirements.txt
 ```
 
-### Configuration Template
-Copy `config.example.txt` to `config.txt` if custom path overrides are needed:
+### Configuration
+Copy `config.example.txt` to `config.txt` to customize settings:
 ```text
 0
 FREELLMAPI_DIR=C:\path\to\your\freellmapi
+WHISPER_MODEL=base
+WHISPER_LANGUAGE=auto
 ```
-*(Line 1 represents the microphone device index; `FREELLMAPI_DIR` points to your FreeLLMAPI directory.)*
+Or copy `.env.example` to `.env` if configuring via environment variables.
 
 ### Running GlideText
 * **Standard Launch:** Double-click `Launch_GlideText.bat` (or `Launch_GlideText.vbs`)
@@ -87,21 +101,9 @@ FREELLMAPI_DIR=C:\path\to\your\freellmapi
   .\.venv\Scripts\python.exe main.py --silent
   ```
 
-### Desktop Shortcut
-Recreate the Desktop shortcut pointing to the launcher:
-```cmd
-.\.venv\Scripts\python.exe create_shortcut.py
-```
-
-### FreeLLMAPI Diagnostic Utility
-Verify FreeLLMAPI process management and catalog connectivity:
-```cmd
-.\.venv\Scripts\python.exe diagnose_freellmapi.py
-```
-
 ### Running Unit Tests
 ```cmd
-.\.venv\Scripts\python.exe tests/test_clean.py
+.\.venv\Scripts\python.exe -m unittest discover tests
 ```
 
 ---
@@ -113,11 +115,3 @@ Verify FreeLLMAPI process management and catalog connectivity:
 | **Right Alt** (Hold) | Push-to-talk recording |
 | **Ctrl + Shift + A** | Toggle continuous VAD dictation mode |
 | **Ctrl + Shift + W** | Toggle floating minimal widget / full dashboard |
-
----
-
-## Known Gaps
-
-- **Voice Editing Commands:** Complex voice editing commands ("delete previous paragraph", "scratch that") are not fully wired up yet.
-- **Optional Dependencies:** DSP noise reduction (`noisereduce`) and WebRTC VAD (`webrtcvad`) are soft-dependencies; if C++ build tools are missing, GlideText uses built-in RMS energy threshold VAD seamlessly.
-- **Windows-Only:** Built specifically for Windows OS APIs (Win32 window focus detection, Windows registry, pycaw audio ducking, COM interfaces).

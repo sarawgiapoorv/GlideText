@@ -1,2 +1,4 @@
 0
 FREELLMAPI_DIR=C:\path\to\your\freellmapi
+WHISPER_MODEL=base
+WHISPER_LANGUAGE=auto

@@ -40,9 +40,17 @@ from typing import Optional
 # Module-level state  (all mutations are protected by _LOCK)
 # ---------------------------------------------------------------------------
 _LOCK = threading.Lock()
+_START_LOCK = threading.Lock()
 _process: Optional[subprocess.Popen] = None   # the npm process we spawned
 _server_ready: bool = False                    # set True once port is confirmed open
 _startup_thread: Optional[threading.Thread] = None
+
+class ProviderHealthStatus:
+    API_HEALTHY = "API_HEALTHY"
+    PORT_OPEN = "PORT_OPEN"
+    API_OVERLOADED = "API_OVERLOADED"
+    API_RATE_LIMITED = "API_RATE_LIMITED"
+    API_UNAVAILABLE = "API_UNAVAILABLE"
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -291,6 +299,47 @@ def _poll_until_ready(deadline: float) -> bool:
 # Public API
 # ---------------------------------------------------------------------------
 
+def check_health(
+    host: str = HOST,
+    port: int = PORT,
+    timeout: float = 1.5,
+    api_key: str = "",
+) -> tuple[str, str]:
+    """
+    Perform a real API-level health check against FreeLLMAPI.
+
+    Distinguishes:
+      - API_HEALTHY: HTTP 200 returned from /v1/models (ready to accept requests)
+      - API_OVERLOADED: HTTP 503 or 504
+      - API_RATE_LIMITED: HTTP 429
+      - PORT_OPEN: TCP connected, but API endpoint gave unexpected status or timeout
+      - API_UNAVAILABLE: Connection refused or port not open
+
+    Returns (status_enum, details_string).
+    """
+    if not _tcp_open(host, port, timeout=min(timeout, 0.5)):
+        return ProviderHealthStatus.API_UNAVAILABLE, f"Port {port} closed or connection refused"
+
+    url = f"http://{host}:{port}/v1/models"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    try:
+        import requests
+        resp = requests.get(url, headers=headers, timeout=timeout)
+        if resp.status_code == 200:
+            return ProviderHealthStatus.API_HEALTHY, "Ready (HTTP 200)"
+        elif resp.status_code == 429:
+            return ProviderHealthStatus.API_RATE_LIMITED, f"Rate limited (HTTP 429)"
+        elif resp.status_code in (502, 503, 504):
+            return ProviderHealthStatus.API_OVERLOADED, f"Overloaded (HTTP {resp.status_code})"
+        else:
+            return ProviderHealthStatus.PORT_OPEN, f"TCP open but API returned HTTP {resp.status_code}"
+    except Exception as e:
+        return ProviderHealthStatus.PORT_OPEN, f"TCP open but HTTP request failed: {e}"
+
+
 def is_running() -> bool:
     """Return True if FreeLLMAPI is currently accepting TCP connections."""
     return _tcp_open()
@@ -298,71 +347,64 @@ def is_running() -> bool:
 
 def start(poll_timeout: float = STARTUP_POLL_TIMEOUT) -> bool:
     """
-    Ensure FreeLLMAPI is running. This function is **idempotent** — calling it
-    when the server is already up is a no-op (fast TCP check, ~0.5 ms).
-
-    Steps:
-      1. Fast TCP check → return True immediately if already listening.
-      2. Find npm on PATH.
-      3. Find (or remember) the FreeLLMAPI project directory.
-      4. Spawn npm run dev headlessly.
-      5. Poll TCP until ready or timeout.
-      6. Register atexit cleanup on first successful spawn.
-
-    Returns True if the server is ready, False if it could not be started.
+    Ensure FreeLLMAPI is running. This function is **idempotent** and thread-safe.
     """
     global _process, _server_ready
 
-    # --- Fast path: already up ---
+    # Fast path: already up
     if _tcp_open():
         logging.info(f"[FreeLLM] Server already listening on {HOST}:{PORT}.")
         with _LOCK:
             _server_ready = True
         return True
 
-    # --- Find tools ---
-    npm_path = _find_npm()
-    if not npm_path:
-        logging.warning(
-            "[FreeLLM] npm not found on PATH. "
-            "Install Node.js from https://nodejs.org and restart GlideText."
-        )
-        return False
+    with _START_LOCK:
+        # Re-check inside lock
+        if _tcp_open():
+            with _LOCK:
+                _server_ready = True
+            return True
 
-    freellm_dir = locate_freellmapi_dir()
-    if not freellm_dir:
-        # Warning already emitted inside locate_freellmapi_dir()
-        return False
+        # --- Find tools ---
+        npm_path = _find_npm()
+        if not npm_path:
+            logging.warning(
+                "[FreeLLM] npm not found on PATH. "
+                "Install Node.js from https://nodejs.org and restart GlideText."
+            )
+            return False
 
-    # --- Spawn ---
-    with _LOCK:
-        if _process is not None and _process.poll() is None:
-            logging.info("[FreeLLM] Process already spawned by this session, waiting for ready...")
+        freellm_dir = locate_freellmapi_dir()
+        if not freellm_dir:
+            return False
+
+        # --- Spawn ---
+        with _LOCK:
+            if _process is not None and _process.poll() is None:
+                logging.info("[FreeLLM] Process already spawned by this session, waiting for ready...")
+            else:
+                proc = _spawn(freellm_dir, npm_path)
+                if proc is None:
+                    return False
+                _process = proc
+                atexit.register(shutdown)
+
+        # --- Poll ---
+        deadline = time.time() + poll_timeout
+        logging.info(f"[FreeLLM] Waiting up to {poll_timeout:.0f}s for port {PORT} to open...")
+        ready = _poll_until_ready(deadline)
+
+        with _LOCK:
+            _server_ready = ready
+
+        if ready:
+            logging.info(f"[FreeLLM] Server is listening on {HOST}:{PORT}.")
         else:
-            proc = _spawn(freellm_dir, npm_path)
-            if proc is None:
-                return False
-            _process = proc
-            # Register cleanup once
-            atexit.register(shutdown)
-
-    # --- Poll ---
-    deadline = time.time() + poll_timeout
-    logging.info(f"[FreeLLM] Waiting up to {poll_timeout:.0f}s for port {PORT} to open...")
-    ready = _poll_until_ready(deadline)
-
-    with _LOCK:
-        _server_ready = ready
-
-    if ready:
-        logging.info(f"[FreeLLM] Server is healthy on {HOST}:{PORT}.")
-    else:
-        logging.warning(
-            f"[FreeLLM] Server did not respond within {poll_timeout:.0f}s. "
-            f"FreeLLMAPI may still be starting (large node_modules first run). "
-            f"GlideText will retry on the first dictation via ai_brain.py."
-        )
-    return ready
+            logging.warning(
+                f"[FreeLLM] Server did not respond within {poll_timeout:.0f}s. "
+                f"FreeLLMAPI may still be starting."
+            )
+        return ready
 
 
 def start_async(poll_timeout: float = STARTUP_POLL_TIMEOUT) -> None:
