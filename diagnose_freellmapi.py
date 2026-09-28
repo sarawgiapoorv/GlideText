@@ -36,7 +36,25 @@ except ImportError:
 PORT = int(os.getenv("FREELLMAPI_PORT", "3001"))
 HOSTS = [f"http://localhost:{PORT}", f"http://127.0.0.1:{PORT}"]
 FREELLM_BASE = f"http://127.0.0.1:{PORT}/v1"  # always prefer explicit IPv4
+
 FREELLMAPI_API_KEY = os.getenv("FREELLMAPI_API_KEY", "").strip()
+if not FREELLMAPI_API_KEY:
+    try:
+        import keyring
+        FREELLMAPI_API_KEY = (
+            keyring.get_password("GlideText_FreeLLM", "api_key")
+            or keyring.get_password("LocalFlow_FreeLLM", "api_key")
+            or ""
+        ).strip()
+    except Exception:
+        pass
+
+if not FREELLMAPI_API_KEY:
+    try:
+        from ai_brain import AIBrain
+        FREELLMAPI_API_KEY = AIBrain._discover_freellmapi_key_from_db()
+    except Exception:
+        pass
 
 CONNECT_TIMEOUT = 4.0   # seconds to wait for TCP connect
 READ_TIMEOUT    = 15.0  # seconds to wait for response body
@@ -194,11 +212,23 @@ def check_1_reachability() -> list[str]:
             reachable.append(base_url)
     if not reachable:
         print(
-            f"\n  [DIAGNOSIS] Port {PORT} is not accepting connections on ANY address.\n"
-            f"  FreeLLMAPI server is NOT RUNNING. Start it with:\n"
-            f"    cd <freellmapi-dir> && npm run dev\n"
-            f"  or let GlideText auto-start it by running main.py."
+            f"\n  [DIAGNOSIS] Port {PORT} is not accepting connections.\n"
+            f"  FreeLLMAPI is currently offline. Attempting auto-start..."
         )
+        try:
+            import freellm_manager
+            if freellm_manager.start(poll_timeout=15):
+                print(f"  [SUCCESS] FreeLLMAPI auto-started on http://127.0.0.1:{PORT}")
+                for base_url in HOSTS:
+                    host = base_url.split("//")[1].split(":")[0]
+                    ok, latency = _tcp_reachable(host, PORT, timeout=CONNECT_TIMEOUT)
+                    if ok:
+                        reachable.append(base_url)
+            else:
+                print("  [ERROR] Auto-start could not open port within timeout.")
+        except Exception as start_err:
+            print(f"  [ERROR] Auto-start failed: {start_err}")
+
     return reachable
 
 
@@ -226,9 +256,7 @@ def check_2_models() -> list[str]:
                         data = resp.json()
                         items = data.get("data", [])
                         model_ids = [m.get("id", "") for m in items if m.get("id")]
-                        print(f"  Found {len(model_ids)} model(s):")
-                        for mid in model_ids:
-                            print(f"    - {mid}")
+                        print(f"  Found {len(model_ids)} model(s) in catalog.")
                     except Exception:
                         print(f"  Could not parse JSON: {resp.text[:300]}")
                     break  # success -- no need to retry without auth
@@ -253,27 +281,19 @@ def check_2_models() -> list[str]:
 def check_3_completions(discovered_models: list[str]) -> None:
     _print_section("CHECK 3: POST /v1/chat/completions  (chat completion payloads)")
 
-    test_cases: list[tuple[str, str, bool]] = []
+    test_cases: list[tuple[str, str, bool]] = [
+        ("3a", "llama-3.3-70b-instruct", True),
+        ("3b", "llama-3.1-8b-instruct", True),
+        ("3c", "auto", True),
+        ("3d", "auto", False),
+    ]
 
-    # Always test model="auto" first, with and without auth
-    test_cases.append(("3a", "auto", True))
-    test_cases.append(("3b", "auto", False))
-
-    # Test the first named model if available
+    # Also test first discovered model if not in the list
     if discovered_models:
-        first_named = discovered_models[0]
-        test_cases.append(("3c", first_named, True))
-        test_cases.append(("3d", first_named, False))
-
-    # Test common fallback model names even if not in /v1/models list
-    for fallback_model in [
-        "groq/llama-3.3-70b-versatile",
-        "llama-3.3-70b-versatile",
-        "sambanova/Meta-Llama-3.1-8B-Instruct",
-    ]:
-        if fallback_model not in discovered_models:
-            test_cases.append(("3e", fallback_model, True))
-            break  # Only test one extra fallback to keep output concise
+        for cand in discovered_models[:5]:
+            if cand not in [tc[1] for tc in test_cases]:
+                test_cases.append(("3e", cand, True))
+                break
 
     any_passed = False
     best_model = None

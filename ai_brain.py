@@ -60,13 +60,12 @@ FREELLMAPI_BASE_URL = _raw_freellm_url.replace("localhost", "127.0.0.1")
 if not FREELLMAPI_BASE_URL.endswith("/v1"):
     FREELLMAPI_BASE_URL = FREELLMAPI_BASE_URL.rstrip("/") + "/v1"
 
-FREELLMAPI_DEFAULT_MODEL = "groq/llama-3.3-70b-versatile"
+FREELLMAPI_DEFAULT_MODEL = "llama-3.3-70b-instruct"
 
 # Ordered fallback model list tried when the default model fails.
 # 'auto' is placed at the end as a last resort.
 FREELLMAPI_FALLBACK_MODELS: list[str] = [
-    "sambanova/Meta-Llama-3.1-8B-Instruct",
-    "openrouter/meta-llama/llama-3.3-70b-instruct:free",
+    "llama-3.1-8b-instruct",
     "auto",
 ]
 
@@ -323,6 +322,7 @@ class AIBrain:
         self._lock = threading.Lock()
         self._cached_vocab = []
         self._session = requests.Session()
+        self._model_cooldowns: dict[str, float] = {}
         
         # Telemetry & Local LLM Engine
         self.vault = vault if vault is not None else HistoryVault()
@@ -724,16 +724,20 @@ class AIBrain:
         url = f"{FREELLMAPI_BASE_URL}/models"
         headers = {"Authorization": f"Bearer {self._freellmapi_api_key}"}
         try:
-            resp = self._session.get(url, headers=headers, timeout=4.0)
+            resp = self._session.get(url, headers=headers, timeout=3.0)
             if resp.status_code == 200:
                 data = resp.json()
-                ids = [m.get("id", "") for m in data.get("data", []) if m.get("id")]
+                # Return only models marked available and skip router/virtual aliases
+                ids = [
+                    m.get("id", "") for m in data.get("data", [])
+                    if m.get("id") and m.get("available") is True and m.get("id") not in ("auto", "fusion")
+                ]
                 if ids:
-                    logging.info(f"[FreeLLMAPI] /v1/models returned {len(ids)} model(s): {ids}")
+                    logging.info(f"[FreeLLMAPI] /v1/models returned {len(ids)} available model(s)")
                 return ids
             logging.warning(f"[FreeLLMAPI] /v1/models returned HTTP {resp.status_code}: {resp.text[:200]}")
         except Exception as e:
-            logging.warning(f"[FreeLLMAPI] /v1/models lookup failed: {e}")
+            logging.debug(f"[FreeLLMAPI] /v1/models lookup failed: {e}")
         return []
 
     def _call_freellmapi_or_openai(
@@ -838,39 +842,45 @@ class AIBrain:
         provider_label = "FreeLLMAPI"
 
         # ── Build ordered model list to try ────────────────────────────────
-        models_to_try = [model]
+        all_candidates = [model]
         for fb in FREELLMAPI_FALLBACK_MODELS:
-            if fb not in models_to_try:
-                models_to_try.append(fb)
+            if fb not in all_candidates:
+                all_candidates.append(fb)
+
+        # Skip models currently in rate-limit cooldown (except 'auto' which routes dynamically)
+        now = time.time()
+        models_to_try = [
+            m for m in all_candidates
+            if now >= self._model_cooldowns.get(m, 0.0) or m == "auto"
+        ]
+        if "auto" not in models_to_try:
+            models_to_try.append("auto")
+
+        connection_failed = False
 
         def _attempt(try_model: str) -> str | None:
-            """Single POST attempt; returns cleaned text or None."""
+            nonlocal connection_failed
             payload = _build_payload(try_model)
             t0 = time.time()
             try:
                 resp = self._session.post(endpoint, json=payload, headers=headers, timeout=timeout)
                 elapsed_ms = int((time.time() - t0) * 1000)
 
-                # Rate limit
-                if resp.status_code == 429:
+                # Rate limit (429) or Service Unavailable (503)
+                if resp.status_code in (429, 503):
+                    if try_model != "auto":
+                        self._model_cooldowns[try_model] = time.time() + 300.0
                     logging.warning(
-                        f"[FreeLLMAPI] Rate limited (429) on model='{try_model}' "
-                        f"after {elapsed_ms}ms."
+                        f"[FreeLLMAPI] Rate limit/overload ({resp.status_code}) on model='{try_model}' "
+                        f"after {elapsed_ms}ms (cooling down 300s)."
                     )
-                    self.vault.log_api_call(provider_label, try_model, "RATE_LIMIT_429", elapsed_ms)
-                    return None
-
-                # Server overload
-                if resp.status_code == 503:
-                    logging.warning(
-                        f"[FreeLLMAPI] Service unavailable (503) on model='{try_model}' "
-                        f"after {elapsed_ms}ms."
-                    )
-                    self.vault.log_api_call(provider_label, try_model, "OVERLOAD_503", elapsed_ms)
+                    self.vault.log_api_call(provider_label, try_model, f"HTTP_{resp.status_code}", elapsed_ms)
                     return None
 
                 # Bad model / not found / bad request -- signal to try fallback
                 if resp.status_code in (400, 404, 422):
+                    if try_model != "auto":
+                        self._model_cooldowns[try_model] = time.time() + 600.0
                     logging.warning(
                         f"[FreeLLMAPI] HTTP {resp.status_code} for model='{try_model}' "
                         f"({elapsed_ms}ms) -- model may not be configured. "
@@ -906,6 +916,7 @@ class AIBrain:
                     .strip()
                 )
                 if raw_output:
+                    self._model_cooldowns.pop(try_model, None)
                     cleaned = LocalLLMEngine._clean_model_output(raw_output, raw_text=user_text)
                     self.vault.log_api_call(provider_label, try_model, "SUCCESS", elapsed_ms)
                     logging.info(
@@ -921,13 +932,19 @@ class AIBrain:
                     self.vault.log_api_call(provider_label, try_model, "EMPTY_RESPONSE", elapsed_ms)
                     return None
 
-            except requests.exceptions.ConnectTimeout:
+            except (requests.exceptions.ConnectTimeout, requests.exceptions.ConnectionError) as e:
+                connection_failed = True
                 elapsed_ms = int((time.time() - t0) * 1000)
-                logging.error(
-                    f"[FreeLLMAPI] Connection refused: Server is not running at "
-                    f"{FREELLMAPI_BASE_URL}. (ConnectTimeout after {elapsed_ms}ms)"
+                logging.warning(
+                    f"[FreeLLMAPI] Server unreachable at {FREELLMAPI_BASE_URL} ({e}). "
+                    "Triggering background start and yielding to Tier 2."
                 )
-                self.vault.log_api_call(provider_label, try_model, "CONNECT_TIMEOUT", elapsed_ms)
+                self.vault.log_api_call(provider_label, try_model, "CONNECTION_ERROR", elapsed_ms)
+                try:
+                    import freellm_manager
+                    freellm_manager.start_async()
+                except Exception:
+                    pass
                 return None
             except requests.exceptions.ReadTimeout:
                 elapsed_ms = int((time.time() - t0) * 1000)
@@ -936,14 +953,6 @@ class AIBrain:
                     f"(ReadTimeout after {elapsed_ms}ms)."
                 )
                 self.vault.log_api_call(provider_label, try_model, "READ_TIMEOUT", elapsed_ms)
-                return None
-            except requests.exceptions.ConnectionError as e:
-                elapsed_ms = int((time.time() - t0) * 1000)
-                logging.error(
-                    f"[FreeLLMAPI] Connection refused: Server is not running at "
-                    f"{FREELLMAPI_BASE_URL}. Detail: {e}"
-                )
-                self.vault.log_api_call(provider_label, try_model, "CONNECTION_ERROR", elapsed_ms)
                 return None
             except requests.exceptions.RequestException as e:
                 elapsed_ms = int((time.time() - t0) * 1000)
@@ -956,25 +965,18 @@ class AIBrain:
                 self.vault.log_api_call(provider_label, try_model, "ERROR", elapsed_ms)
                 return None
 
-        # ── Try primary model first ─────────────────────────────────────────
-        result = _attempt(model)
-        if result is not None:
-            return result
-
-        # ── If primary failed with 400/404, query live models and try fallbacks ──
-        live_models = self._fetch_freellmapi_models()
-        for live_model in live_models:
-            if live_model not in models_to_try:
-                models_to_try.insert(1, live_model)  # prioritize live models
-
-        for fallback_model in models_to_try[1:]:  # skip index 0 (already tried)
-            logging.info(f"[FreeLLMAPI] Retrying with fallback model='{fallback_model}'...")
-            result = _attempt(fallback_model)
+        for candidate_model in models_to_try:
+            if candidate_model != models_to_try[0]:
+                logging.info(f"[FreeLLMAPI] Retrying with model='{candidate_model}'...")
+            result = _attempt(candidate_model)
             if result is not None:
                 return result
+            if connection_failed:
+                logging.info("[FreeLLMAPI] Server is offline or booting; skipping further model fallbacks.")
+                return None
 
         logging.warning(
-            f"[FreeLLMAPI] All {len(models_to_try)} model attempt(s) exhausted. "
+            f"[FreeLLMAPI] All model attempt(s) exhausted. "
             f"Yielding to Tier 2 (Gemini)."
         )
         return None

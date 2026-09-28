@@ -49,7 +49,7 @@ _startup_thread: Optional[threading.Thread] = None
 # ---------------------------------------------------------------------------
 PORT: int = int(os.getenv("FREELLMAPI_PORT", "3001"))
 HOST: str = "127.0.0.1"                        # always explicit IPv4 (avoids ::1 on Windows)
-STARTUP_POLL_TIMEOUT: float = 8.0              # seconds to wait after spawn
+STARTUP_POLL_TIMEOUT: float = 12.0             # seconds to wait after spawn
 POLL_INTERVAL: float = 0.3                     # TCP probe frequency
 TCP_CONNECT_TIMEOUT: float = 0.5              # per-probe timeout
 

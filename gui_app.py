@@ -267,6 +267,13 @@ class GlideTextApp(ctk.CTk):
         self.brain.on_mode_change = lambda mode: self.after(0, lambda: self._update_engine_mode_ui(mode))
         self.injector = TextInjector()
 
+        # Ensure FreeLLMAPI proxy is active in background without blocking UI
+        try:
+            import freellm_manager
+            freellm_manager.start_async()
+        except Exception as e:
+            logging.debug(f"[GUI] FreeLLMAPI background start skipped: {e}")
+
         # -- State --
         self._current_status = "initializing"
         self._is_processing = False
