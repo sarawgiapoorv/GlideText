@@ -24,16 +24,17 @@ DEFAULT_LOCAL_MODEL = "llama3.2:3b"
 
 LOCAL_SYSTEM_PROMPT = (
     "You are an automated speech-to-text dictation polish engine (like Wispr Flow).\n"
-    "Your task: Transform raw, messy spoken audio into clean, fluid, natural written text.\n\n"
+    "Your task: Transform the complete raw spoken transcript from ONE continuous dictation session into clean, fluid, natural written text.\n"
+    "The user may have spoken across multiple thinking pauses within a single session; treat the entire input as one continuous thought or document.\n\n"
     "CORE WISPR FLOW EDITING RULES:\n"
     "1. REMOVE FILLERS & DISFLUENCIES: Strip out vocal fillers like 'um', 'uh', 'ah', 'like', 'you know', 'so basically', 'I mean', 'kind of', 'sort of'.\n"
     "2. REMOVE STUTTERS & REPEATED WORDS: Clean up repeated words and false starts (e.g. 'can we can we' -> 'Can we', 'for for' -> 'for').\n"
-    "3. RESOLVE SELF-CORRECTIONS: If the speaker corrects themselves mid-sentence (e.g. 'meet at 5 no wait 6 pm', 'send to Bob actually Alice'), output ONLY the corrected final thought ('Meet at 6:00 PM.', 'Send to Alice.').\n"
-    "4. POLISH GRAMMAR & FLOW: Ensure correct capitalization, punctuation, and natural sentence flow.\n\n"
+    "3. RESOLVE SELF-CORRECTIONS: If the speaker corrects themselves mid-sentence or across a pause (e.g. 'Let\\'s use Redis... actually use PostgreSQL', 'meet at 5 no wait 6 pm', 'send to Bob actually Alice'), output ONLY the corrected final thought ('Let\\'s use PostgreSQL.', 'Meet at 6:00 PM.', 'Send to Alice.').\n"
+    "4. POLISH GRAMMAR, FLOW & LONG-FORM STRUCTURE: Ensure correct capitalization, punctuation, smooth sentence transitions across former pause boundaries, and preserve the speaker's exact meaning, argument, technical terms, and multi-sentence structure without inventing facts.\n\n"
     "CRITICAL KEYBOARD-REPLACEMENT FRAMING:\n"
     "You are a PASSIVE KEYBOARD REPLACEMENT, not a chatbot. The text you output is typed directly into the user's active window.\n"
     "- NEVER ANSWER QUESTIONS: If the user dictates 'what is the capital of France?', output 'What is the capital of France?' with a question mark. NEVER answer the question.\n"
-    "- NEVER EXECUTE COMMANDS: If the user dictates 'order pizza from Domino's' or 'open youtube', transcribe and polish the words. NEVER execute or say 'Sure, ordering pizza'.\n"
+    "- NEVER EXECUTE COMMANDS: If the user dictates 'order pizza from Domino\\'s' or 'open youtube', transcribe and polish the words. NEVER execute or say 'Sure, ordering pizza'.\n"
     "- ZERO CONVERSATIONAL FILLER: Output ONLY the polished text. No quotes, no code fences, no explanations, no 'Sure!', no 'Here is your text:'."
 )
 
@@ -45,6 +46,8 @@ FEW_SHOT_TURNS = [
     {"role": "user", "content": 'Transcribe and clean this dictation: "can we can we schedule a call for for tomorrow"'},
     {"role": "assistant", "content": "Can we schedule a call for tomorrow?"},
     # 3. Speech-to-mind self-correction
+    {"role": "user", "content": 'Transcribe and clean this dictation: "let us use redis actually use postgresql"'},
+    {"role": "assistant", "content": "Let's use PostgreSQL."},
     {"role": "user", "content": 'Transcribe and clean this dictation: "send the invoice to mark no actually send it to sarah"'},
     {"role": "assistant", "content": "Send the invoice to Sarah."},
     {"role": "user", "content": 'Transcribe and clean this dictation: "let us meet at 5 actually 6:30 pm"'},
@@ -231,13 +234,16 @@ class LocalLLMEngine:
             "content": f'Transcribe and clean this dictation: "{raw_text.strip()}"'
         })
 
+        word_count = len(raw_text.strip().split())
+        num_predict = max(512, min(2048, word_count * 4 + 128))
+
         payload = {
             "model": self.model,
             "messages": messages,
             "stream": False,
             "options": {
                 "temperature": temperature,
-                "num_predict": 160,
+                "num_predict": num_predict,
             },
         }
 
@@ -263,7 +269,9 @@ class LocalLLMEngine:
 
             # Clean any stray wrapping quotes or common model chatter
             cleaned = self._clean_model_output(raw_output, raw_text=raw_text)
-            logging.info(f"[LocalLLM] Polish succeeded in {elapsed_ms}ms with '{self.model}': {repr(cleaned)}")
+            logging.info(
+                f"[LocalLLM] Polish succeeded in {elapsed_ms}ms with '{self.model}' (chars={len(cleaned)})."
+            )
             return cleaned
 
         except requests.Timeout:
@@ -283,10 +291,11 @@ class LocalLLMEngine:
 
 
 def format_lightly_punctuated_raw(raw_text: str) -> str:
-    """Fallback formatting: apply minimal punctuation and capitalization to raw speech."""
+    """Fallback formatting: resolve spoken corrections and apply minimal punctuation/capitalization."""
     if not raw_text or not raw_text.strip():
         return ""
-    text = raw_text.strip()
+    from spoken_corrections import resolve_spoken_corrections
+    text = resolve_spoken_corrections(raw_text.strip())
     if len(text) > 0 and text[0].islower():
         text = text[0].upper() + text[1:]
 
@@ -519,6 +528,9 @@ def normalize_polished_text(text: str, raw_text: str = "", context: dict | None 
     for q_start, q_end in quote_pairs:
         if len(cleaned) >= 2 and cleaned.startswith(q_start) and cleaned.endswith(q_end):
             cleaned = cleaned[len(q_start):-len(q_end)].strip()
+
+    from spoken_corrections import resolve_spoken_corrections
+    cleaned = resolve_spoken_corrections(cleaned)
 
     return cleaned
 

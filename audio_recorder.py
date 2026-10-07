@@ -98,13 +98,23 @@ def get_active_window_info() -> dict:
     """Detect the currently focused Windows application.
 
     Returns a dict with keys:
-        title    -- window title string
-        exe_name -- executable basename (e.g. 'Code.exe', 'chrome.exe')
-        app_hint -- simplified app name for context prompts
+        title                -- window title string (cleared if sensitive context)
+        exe_name             -- executable basename (e.g. 'Code.exe', 'chrome.exe')
+        app_hint             -- simplified privacy-safe app name for context prompts
+        app_category         -- canonical AppCategory string ('IDE/code editor', 'terminal', etc.)
+        is_sensitive_context -- True if password manager / credential prompt detected
 
-    Returns empty-string values on failure or non-Windows platforms.
+    Returns safe empty/unknown values on failure or non-Windows platforms.
     """
-    result = {"title": "", "exe_name": "", "app_hint": ""}
+    from context_snapshot import AppCategory, classify_application
+
+    result = {
+        "title": "",
+        "exe_name": "",
+        "app_hint": "",
+        "app_category": AppCategory.UNKNOWN.value,
+        "is_sensitive_context": False,
+    }
     if not HAS_WIN32:
         return result
 
@@ -113,11 +123,11 @@ def get_active_window_info() -> dict:
         hwnd = user32.GetForegroundWindow()
         result["hwnd"] = hwnd
 
-        # Window title
+        # Window title (used transiently for classification; never leaked in prompts)
         length = user32.GetWindowTextLengthW(hwnd)
         buf = ctypes.create_unicode_buffer(length + 1)
         user32.GetWindowTextW(hwnd, buf, length + 1)
-        result["title"] = buf.value
+        raw_title = buf.value or ""
 
         # Process executable
         pid = ctypes.wintypes.DWORD()
@@ -128,6 +138,7 @@ def get_active_window_info() -> dict:
         h_process = kernel32.OpenProcess(
             PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value
         )
+        exe_name = ""
         if h_process:
             exe_buf = ctypes.create_unicode_buffer(512)
             size = ctypes.wintypes.DWORD(512)
@@ -139,26 +150,19 @@ def get_active_window_info() -> dict:
             exe_name = os.path.basename(exe_path) if exe_path else ""
             result["exe_name"] = exe_name
 
-            # Simplify to app hint
-            app_map = {
-                "Code.exe": "VS Code",
-                "code.exe": "VS Code",
-                "chrome.exe": "Chrome Browser",
-                "msedge.exe": "Edge Browser",
-                "firefox.exe": "Firefox Browser",
-                "slack.exe": "Slack",
-                "Teams.exe": "Microsoft Teams",
-                "OUTLOOK.EXE": "Outlook",
-                "WINWORD.EXE": "Microsoft Word",
-                "EXCEL.EXE": "Microsoft Excel",
-                "POWERPNT.EXE": "Microsoft PowerPoint",
-                "notepad.exe": "Notepad",
-                "WindowsTerminal.exe": "Windows Terminal",
-                "Discord.exe": "Discord",
-                "Telegram.exe": "Telegram",
-                "WhatsApp.exe": "WhatsApp",
-            }
-            result["app_hint"] = app_map.get(exe_name, exe_name.replace(".exe", ""))
+        category, safe_app_name, is_sensitive = classify_application(
+            exe_name=exe_name,
+            window_title=raw_title,
+            app_hint="",
+        )
+        result["app_category"] = category.value
+        result["is_sensitive_context"] = is_sensitive
+        if category != AppCategory.UNKNOWN:
+            result["app_hint"] = safe_app_name
+        else:
+            result["app_hint"] = exe_name.replace(".exe", "") if exe_name else ""
+        # Never retain raw window title if sensitive context detected
+        result["title"] = "" if is_sensitive else raw_title
     except Exception:
         pass  # Never crash on context detection failure
 
@@ -277,10 +281,14 @@ class AudioRecorder:
         self._lock = threading.Lock()
         self._ducker = AudioDucker()
 
-        # VAD state
+        # VAD state (speech / silence activity detector)
         self._vad_enabled = False
         self._auto_stop_callback = None
+        self._on_speech_callback = None
+        self._on_silence_callback = None
+        self._chunk_callback = None
         self._speech_detected = False
+        self._is_in_silence_pause = False
         self._speech_start_time = 0.0
         self._last_speech_time = 0.0
 
@@ -349,30 +357,48 @@ class AudioRecorder:
         threading.Thread(target=_warmup_impl, daemon=True).start()
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # PortAudio callback -- runs on the audio thread
     # ------------------------------------------------------------------
     def _audio_callback(self, indata: np.ndarray, frames: int,
                         time_info, status) -> None:
-        """Push audio blocks into the queue; update VAD energy tracking."""
+        """Push audio blocks into the queue; update VAD energy tracking.
+
+        Memory discipline:
+          - Allocates a single `block_copy` (`int16`) per callback and shares
+            that immutable block reference across `_queue`, `_chunk_callback`,
+            and `_vad_queue` without duplicating buffers.
+        """
         if status:
             logging.info(f"  [Recorder] Stream status: {status}")
-        self._queue.put(indata.copy())
-        if hasattr(self, "_accumulated_frames"):
-            self._accumulated_frames.append(indata.copy())
-        if self._vad_enabled:
-            self._vad_queue.put(indata.copy())
-            
-        # Track RMS for UI Live Waveform
+        block_copy = indata.copy()
+        self._queue.put(block_copy)
+        if getattr(self, "_chunk_callback", None) is not None:
+            try:
+                self._chunk_callback(block_copy)
+            except Exception:
+                pass
+        if self._vad_enabled and self._vad_queue.qsize() < 250:
+            self._vad_queue.put(block_copy)
+
+        # Track RMS for UI Live Waveform using float32 (half the memory of float64)
         try:
-            self._current_rms = np.sqrt(np.mean(indata.astype(np.float64) ** 2))
+            f32 = indata.astype(np.float32, copy=False)
+            self._current_rms = float(np.sqrt(np.mean(f32 * f32)))
         except Exception:
             self._current_rms = 0.0
 
     # ------------------------------------------------------------------
-    # VAD monitor thread
+    # VAD monitor thread (speech / silence activity detector)
     # ------------------------------------------------------------------
     def _vad_monitor(self):
-        """Background thread that watches energy levels for silence detection."""
+        """Background thread that monitors speech/silence activity states.
+
+        CRITICAL ARCHITECTURE:
+        VAD detects speech activity and silence/thinking pauses to update
+        session state and UI diagnostics, but NEVER stops the audio stream
+        or finalizes a continuous dictation session on silence.
+        """
         import sys
         if sys.platform == "win32":
             try:
@@ -392,76 +418,117 @@ class AudioRecorder:
 
         frame_duration_ms = 30
         frame_samples = int(self.sample_rate * (frame_duration_ms / 1000.0))
-        audio_buffer = np.array([], dtype=np.int16)
+        audio_buffer = np.empty(0, dtype=np.int16)
+
+        def _eval_frame(frame_1d: np.ndarray) -> None:
+            is_speech = False
+            if vad:
+                try:
+                    is_speech = vad.is_speech(frame_1d.tobytes(), self.sample_rate)
+                except Exception:
+                    pass
+            else:
+                f32 = frame_1d.astype(np.float32, copy=False)
+                rms = float(np.sqrt(np.mean(f32 * f32)))
+                is_speech = rms > VAD_ENERGY_THRESHOLD
+            self._process_vad_frame_state(is_speech, time.time())
 
         while self._is_recording and self._vad_enabled:
-            # Drain VAD queue
-            blocks = []
+            processed_any = False
             while not self._vad_queue.empty():
                 try:
-                    blocks.append(self._vad_queue.get_nowait())
+                    block = self._vad_queue.get_nowait()
                 except queue.Empty:
                     break
-            
-            if blocks:
-                # np.concatenate with 2D blocks requires flattening if it was 2D (it is mono but shape is (frames, 1))
-                blocks_flat = [b.flatten() for b in blocks]
-                audio_buffer = np.concatenate([audio_buffer] + blocks_flat)
-            
-            # Process complete frames
-            while len(audio_buffer) >= frame_samples:
-                frame = audio_buffer[:frame_samples]
-                audio_buffer = audio_buffer[frame_samples:]
-                
-                is_speech = False
-                if vad:
+                processed_any = True
+                flat = block.ravel()
+                # Fast path: standard 30ms block with empty remainder buffer (zero concatenation)
+                if len(audio_buffer) == 0 and len(flat) == frame_samples:
+                    _eval_frame(flat)
+                else:
+                    audio_buffer = np.concatenate((audio_buffer, flat)) if len(audio_buffer) else flat
+                    offset = 0
+                    total_len = len(audio_buffer)
+                    while total_len - offset >= frame_samples:
+                        _eval_frame(audio_buffer[offset:offset + frame_samples])
+                        offset += frame_samples
+                    audio_buffer = (
+                        audio_buffer[offset:].copy()
+                        if offset < total_len
+                        else np.empty(0, dtype=np.int16)
+                    )
+            if not processed_any:
+                time.sleep(0.01)
+
+    def _process_vad_frame_state(self, is_speech: bool, now: float) -> None:
+        """Process a single VAD decision and fire speech/silence activity callbacks.
+
+        Does NOT stop recording or finalize the session.
+        """
+        if is_speech:
+            if not self._speech_detected or self._is_in_silence_pause:
+                self._speech_detected = True
+                self._is_in_silence_pause = False
+                self._speech_start_time = now
+                if self._on_speech_callback:
                     try:
-                        # webrtcvad requires bytes
-                        is_speech = vad.is_speech(frame.tobytes(), self.sample_rate)
-                    except Exception:
-                        pass
-                else:
-                    # Fallback RMS energy VAD
-                    rms = np.sqrt(np.mean(frame.astype(np.float64) ** 2))
-                    is_speech = rms > VAD_ENERGY_THRESHOLD
+                        self._on_speech_callback()
+                    except Exception as e:
+                        logging.error(f"  [VAD] Speech callback error: {e}")
+            self._last_speech_time = now
+        else:
+            if self._speech_detected and not self._is_in_silence_pause:
+                speech_duration = self._last_speech_time - self._speech_start_time
+                silence_duration = now - self._last_speech_time
 
-                now = time.time()
-                
-                if is_speech:
-                    if not self._speech_detected:
-                        self._speech_detected = True
-                        self._speech_start_time = now
-                    self._last_speech_time = now
-                else:
-                    if self._speech_detected:
-                        speech_duration = self._last_speech_time - self._speech_start_time
-                        silence_duration = now - self._last_speech_time
+                if (speech_duration >= VAD_MIN_SPEECH_DURATION
+                        and silence_duration >= VAD_SILENCE_DURATION):
+                    self._is_in_silence_pause = True
+                    logging.info("  [VAD] Silence detected -- session paused (waiting for more speech or explicit stop).")
+                    self._trigger_auto_stop(silence_duration=silence_duration)
 
-                        if (speech_duration >= VAD_MIN_SPEECH_DURATION
-                                and silence_duration >= VAD_SILENCE_DURATION):
-                            logging.info("  [VAD] Silence detected -- auto-stopping.")
-                            self._trigger_auto_stop()
-                            return
-            time.sleep(0.01)
+    def _trigger_auto_stop(self, silence_duration: float = VAD_SILENCE_DURATION):
+        """Notify listeners that silence/pause was detected.
 
-    def _trigger_auto_stop(self):
-        """Stop recording and invoke the auto-stop callback."""
-        audio_path = self.stop()
-        if audio_path and self._auto_stop_callback:
+        NOTE: Retained for backward compatibility in naming, but its semantic
+        role is now strictly a non-terminating silence-activity notification.
+        It does NOT call `self.stop()` and does NOT end the recording session.
+        """
+        if self._on_silence_callback:
             try:
-                self._auto_stop_callback(audio_path)
+                self._on_silence_callback(silence_duration)
             except Exception as e:
-                logging.error(f"  [VAD] Auto-stop callback error: {e}")
+                logging.error(f"  [VAD] Silence callback error: {e}")
+        if self._auto_stop_callback:
+            try:
+                self._auto_stop_callback(None)
+            except TypeError:
+                try:
+                    self._auto_stop_callback()
+                except Exception as e:
+                    logging.error(f"  [VAD] Activity callback error: {e}")
+            except Exception as e:
+                logging.error(f"  [VAD] Activity callback error: {e}")
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def start(self, auto_stop_callback=None) -> None:
+    def start(
+        self,
+        auto_stop_callback=None,
+        on_speech_callback=None,
+        on_silence_callback=None,
+        chunk_callback=None,
+    ) -> None:
         """Begin recording from the selected microphone.
 
         Args:
-            auto_stop_callback: If provided, enables VAD. Called with
-                                the audio file path when silence is detected.
+            auto_stop_callback: Optional legacy VAD silence-activity callback.
+                                Does NOT stop the recorder; notifies on silence.
+            on_speech_callback: Optional callback invoked when speech starts or resumes.
+            on_silence_callback: Optional callback(silence_duration) invoked when
+                                 silence pause is detected after speech.
+            chunk_callback: Optional callback(np.ndarray) invoked for each captured audio block.
         """
         with self._lock:
             if self._is_recording:
@@ -484,9 +551,16 @@ class AudioRecorder:
 
             # Reset VAD state
             self._accumulated_frames = []
-            self._vad_enabled = auto_stop_callback is not None
             self._auto_stop_callback = auto_stop_callback
+            self._on_speech_callback = on_speech_callback
+            self._on_silence_callback = on_silence_callback
+            self._chunk_callback = chunk_callback
+            self._vad_enabled = any(
+                cb is not None
+                for cb in (auto_stop_callback, on_speech_callback, on_silence_callback)
+            )
             self._speech_detected = False
+            self._is_in_silence_pause = False
             self._speech_start_time = 0.0
             self._last_speech_time = time.time()
 
@@ -523,17 +597,53 @@ class AudioRecorder:
             )
             self._vad_thread.start()
 
+    # Maximum audio duration (seconds) for full-array spectral noise reduction.
+    # Above this threshold, skipping full-buffer STFT prevents large float64 RAM/CPU spikes
+    # (faster-whisper already applies Silero VAD and log-mel filtering).
+    MAX_NOISE_REDUCE_SECONDS: float = 30.0
+
+    def cancel(self) -> None:
+        """Immediately stop recording and discard all queued audio buffers without writing to disk."""
+        with self._lock:
+            self._is_recording = False
+            self._vad_enabled = False
+            self._chunk_callback = None
+            if self._stream is not None:
+                try:
+                    self._stream.stop()
+                    self._stream.close()
+                except Exception as e:
+                    logging.error(f"  [Recorder] Stream close error on cancel: {e}")
+                self._stream = None
+            self._ducker.restore()
+            self._accumulated_frames = []
+
+        while not self._queue.empty():
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                break
+        while not self._vad_queue.empty():
+            try:
+                self._vad_queue.get_nowait()
+            except queue.Empty:
+                break
+
     def stop(self) -> str | None:
         """Stop recording and return the path to the saved .wav file.
 
         Returns:
-            Path to the .wav file, or None if nothing was recorded.
+            Path to the .wav file, or None if nothing was recorded or disk write failed.
+            Guaranteed to release internal recorder queues so raw audio is never
+            retained indefinitely on the recorder instance.
         """
         with self._lock:
             if not self._is_recording:
                 return None
             self._is_recording = False
             self._vad_enabled = False
+            self._chunk_callback = None
+            self._accumulated_frames = []
 
             if self._stream is not None:
                 try:
@@ -546,7 +656,14 @@ class AudioRecorder:
             # Restore system audio
             self._ducker.restore()
 
-        # Stitch all queued frames
+        # Drain VAD queue immediately so it holds no references
+        while not self._vad_queue.empty():
+            try:
+                self._vad_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        # Stitch all queued frames and immediately release the frame list
         frames: list[np.ndarray] = []
         while not self._queue.empty():
             try:
@@ -559,6 +676,7 @@ class AudioRecorder:
             return None
 
         audio_data = np.concatenate(frames, axis=0)
+        frames.clear()
 
         # Discard very short recordings (accidental taps, < 0.3s)
         min_samples = int(self.sample_rate * 0.3)
@@ -566,41 +684,51 @@ class AudioRecorder:
             logging.info("  [Recorder] Recording too short -- discarded.")
             return None
 
-        # Apply DSP noise suppression
-        if HAS_NOISE_REDUCE:
+        duration = len(audio_data) / float(self.sample_rate)
+
+        # Apply DSP noise suppression only on short/medium clips to prevent
+        # multi-hundred-MB float64 STFT RAM & CPU spikes on multi-minute sessions
+        if HAS_NOISE_REDUCE and duration <= self.MAX_NOISE_REDUCE_SECONDS:
             logging.info("  [Recorder] Noise suppression is active. Applying reduction...")
             try:
-                # noisereduce expects flat array for mono
-                flat_audio = audio_data.flatten()
+                flat_audio = audio_data.ravel()
                 reduced = nr.reduce_noise(y=flat_audio, sr=self.sample_rate)
-                # Clip to prevent overflow/distortion when casting float64 -> int16
                 clipped = np.clip(reduced, -32768.0, 32767.0)
                 audio_data = clipped.astype(np.int16).reshape(-1, 1)
+                del reduced, clipped, flat_audio
             except Exception as e:
                 logging.error(f"  [Recorder] Noise suppression processing failed: {e}")
+        elif HAS_NOISE_REDUCE:
+            logging.info(
+                f"  [Recorder] Long session ({duration:.1f}s > {self.MAX_NOISE_REDUCE_SECONDS}s) "
+                "-- bypassing full-buffer STFT noise reduction to preserve low RAM/CPU."
+            )
         else:
             logging.info("  [Recorder] Noise suppression is disabled.")
 
-        # Check if wavio is available before trying to write
-        if not HAS_WAVIO:
-            logging.info("  [Recorder] wavio library is not available. Cannot write WAV.")
-            return None
-
         # Write to a temp .wav file with a unique name to avoid races in continuous mode
         import uuid
-        tmp_dir = os.path.join(tempfile.gettempdir(), "glidetext")
-        os.makedirs(tmp_dir, exist_ok=True)
-        filepath = os.path.join(tmp_dir, f"rec_{uuid.uuid4().hex}.wav")
+        import wave
 
         try:
-            wavio.write(filepath, audio_data, self.sample_rate, sampwidth=2)
-            duration = len(audio_data) / self.sample_rate
-            logging.info(f"  [Recorder] Saved {duration:.1f}s recording to {filepath}")
-        except Exception as e:
-            logging.error(f"  [Recorder] Failed to write WAV: {e}")
-            return None
+            tmp_dir = os.path.join(tempfile.gettempdir(), "glidetext")
+            os.makedirs(tmp_dir, exist_ok=True)
+            filepath = os.path.join(tmp_dir, f"rec_{uuid.uuid4().hex}.wav")
 
-        return filepath
+            if HAS_WAVIO and wavio is not None:
+                wavio.write(filepath, audio_data, self.sample_rate, sampwidth=2)
+            else:
+                with wave.open(filepath, "wb") as wf:
+                    wf.setnchannels(self.channels)
+                    wf.setsampwidth(2)
+                    wf.setframerate(self.sample_rate)
+                    wf.writeframes(np.asarray(audio_data, dtype=np.int16).tobytes())
+
+            logging.info(f"  [Recorder] Saved {duration:.1f}s recording to {filepath}")
+            return filepath
+        except Exception as e:
+            logging.error(f"  [Recorder] Failed to write WAV (disk error): {e}")
+            return None
 
     @property
     def is_recording(self) -> bool:
@@ -611,12 +739,19 @@ class AudioRecorder:
         return self._current_rms
 
     def get_accumulated_audio(self) -> np.ndarray | None:
-        """Get a copy of the audio data accumulated so far in the session."""
+        """Get a concatenated view of the audio data currently queued in the active session."""
         with self._lock:
-            if not hasattr(self, "_accumulated_frames") or not self._accumulated_frames:
+            if getattr(self, "_accumulated_frames", None):
+                try:
+                    return np.concatenate(self._accumulated_frames, axis=0)
+                except Exception:
+                    return None
+            with self._queue.mutex:
+                queued = list(self._queue.queue)
+            if not queued:
                 return None
             try:
-                return np.concatenate(self._accumulated_frames, axis=0)
+                return np.concatenate(queued, axis=0)
             except Exception as e:
-                logging.error(f"  [Recorder] Failed to concatenate accumulated frames: {e}")
+                logging.error(f"  [Recorder] Failed to concatenate queued frames: {e}")
                 return None

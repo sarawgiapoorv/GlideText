@@ -77,6 +77,12 @@ from audio_recorder import AudioRecorder, get_active_window_info
 from ai_brain import AIBrain
 from text_injector import TextInjector
 from history_vault import HistoryVault
+from dictation_session import (
+    DictationSession,
+    DictationSessionCoordinator,
+    SessionMode,
+    SessionState,
+)
 
 try:
     import keyring
@@ -323,11 +329,13 @@ class GlideTextApp(ctk.CTk):
         self._pulse_job = None
         self._tray_icon = None
         self._settings_open   = False
-        self.is_continuous_mode = False
+        self._continuous_active_flag = False
         self.is_widget_mode   = False
         self._active_style    = "Normal"
         self._last_injected_text = ""  # For "scratch that" editing commands
 
+        self._active_session: DictationSession | None = None
+        self._processed_session_ids: set[str] = set()
         self._is_starting_recording = False
         self._stop_pending = False
 
@@ -517,6 +525,31 @@ class GlideTextApp(ctk.CTk):
                 self.reset_cloud_btn.pack_forget()
         except Exception:
             pass
+
+    @property
+    def is_continuous_mode(self) -> bool:
+        """True if there is an active capturing session in continuous mode."""
+        with self._lock:
+            if self._active_session is not None:
+                return (
+                    self._active_session.mode == SessionMode.CONTINUOUS
+                    and self._active_session.is_active_capture
+                )
+            return getattr(self, "_continuous_active_flag", False)
+
+    @is_continuous_mode.setter
+    def is_continuous_mode(self, value: bool) -> None:
+        with self._lock:
+            self._continuous_active_flag = bool(value)
+
+    @property
+    def is_recording(self) -> bool:
+        """True if the session is currently capturing audio (RECORDING or PAUSED)."""
+        with self._lock:
+            return bool(
+                self._active_session is not None
+                and self._active_session.is_active_capture
+            )
 
     def _on_reset_cloud_click(self):
         """User manually resets temporary cooldowns back to FreeLLMAPI (Priority 1)."""
@@ -855,7 +888,8 @@ class GlideTextApp(ctk.CTk):
 
         presets = {
             "ready":        (C.GREEN,    "READY TO DICTATE",  "Hold [Right Alt] to record | Ctrl+Shift+A for continuous"),
-            "recording":    (C.RED,      "RECORDING",         "Release [Right Alt] to stop | Ctrl+Shift+A to toggle"),
+            "recording":    (C.RED,      "RECORDING",         "Listening... (Release [Right Alt] or Ctrl+Shift+A to finish)"),
+            "paused":       (C.AMBER,    "PAUSED (THINKING)", "Paused — keep speaking when ready (Ctrl+Shift+A to finish)"),
             "transcribing": (C.AMBER,    "TRANSCRIBING",      "Transcribing speech locally..."),
             "processing":   (C.AMBER,    "PROCESSING",        "Polishing text with AI..."),
             "typing":       (C.ACCENT,   "TYPING",            "Injecting text at cursor..."),
@@ -874,7 +908,7 @@ class GlideTextApp(ctk.CTk):
         except Exception:
             pass  # Widget may not exist yet
 
-        if status == "recording":
+        if status in ("recording", "paused"):
             self.status_dot.pack_forget()
             self.waveform_canvas.pack(pady=(4, 4), before=self.status_label)
             self._animate_waveform()
@@ -888,24 +922,38 @@ class GlideTextApp(ctk.CTk):
                 pass
 
     def _animate_waveform(self):
-        if self._current_status != "recording":
+        if self._current_status not in ("recording", "paused"):
             self.waveform_canvas.delete("all")
             return
             
         try:
             self.waveform_canvas.delete("all")
+            w = 80
+            h = 40
+            bar_w = 8
+            gap = 6
+            start_x = (w - (5 * bar_w + 4 * gap)) / 2
+
+            if self._current_status == "paused":
+                # Non-intrusive calm amber indicator during thinking pauses
+                for i in range(5):
+                    bar_h = 6 if (i == 0 or i == 4) else (8 if (i == 1 or i == 3) else 10)
+                    x0 = start_x + i * (bar_w + gap)
+                    y0 = (h - bar_h) / 2
+                    x1 = x0 + bar_w
+                    y1 = y0 + bar_h
+                    self.waveform_canvas.create_rectangle(
+                        x0, y0, x1, y1, fill=C.AMBER, outline=""
+                    )
+                self._pulse_job = self.after(200, self._animate_waveform)
+                return
+
             rms = getattr(self.recorder, "current_rms", 0.0)
             
             # Simple volume mapping
             normalized = min(max(rms / 1500.0, 0.1), 1.0)
                 
             # Draw 5 bars
-            w = 80
-            h = 40
-            bar_w = 8
-            gap = 6
-            start_x = (w - (5 * bar_w + 4 * gap)) / 2
-            
             for i in range(5):
                 jitter = random.uniform(0.6, 1.4) if rms > 150 else 1.0
                 # Falloff towards edges
@@ -1001,18 +1049,47 @@ class GlideTextApp(ctk.CTk):
         threading.Thread(target=self.brain.pre_warm_gemini_connection, daemon=True).start()
 
     def _capture_lookback_context(self, context_info: dict | None = None) -> str:
-        """Selects the preceding ~5-8 words using Ctrl+Shift+Left 6 times, copies, and restores the cursor."""
+        """Selects the preceding ~5-8 words using Ctrl+Shift+Left 6 times, copies, and restores the cursor.
+
+        Privacy & security guarantees:
+          - Skips terminals and sensitive/credential windows (password managers, login/2FA, .env files).
+          - Strictly bounds and sanitizes captured text via `sanitize_and_bound_cursor_text`.
+          - Logs only character length, never raw user text.
+        """
         # Flag check: LOOKBACK_CONTEXT=0 by default
         cfg = _read_config()
         lookback_enabled = os.getenv("LOOKBACK_CONTEXT", str(cfg.get("lookback_context", 0))).strip() == "1"
         if not lookback_enabled:
             return ""
 
-        # Skip for terminals
+        from context_snapshot import (
+            AppCategory,
+            classify_application,
+            sanitize_and_bound_cursor_text,
+        )
+
+        app_category = AppCategory.UNKNOWN
+        is_sensitive = False
         if context_info:
-            app_hint = context_info.get("app_hint", "").lower()
-            exe_name = context_info.get("exe_name", "").lower()
-            if any(term in app_hint or term in exe_name for term in ["terminal", "cmd", "powershell", "bash", "wsl"]):
+            app_hint = context_info.get("app_hint", "")
+            exe_name = context_info.get("exe_name", "")
+            title = context_info.get("title", "")
+            app_category, _safe_name, is_sensitive = classify_application(
+                exe_name=exe_name,
+                window_title=title,
+                app_hint=app_hint,
+            )
+            if bool(context_info.get("is_sensitive_context")):
+                is_sensitive = True
+
+            if is_sensitive:
+                logging.info("[Lookback] Sensitive/credential context active -- skipping lookback capture.")
+                return ""
+
+            if app_category == AppCategory.TERMINAL or any(
+                term in app_hint.lower() or term in exe_name.lower()
+                for term in ["terminal", "cmd", "powershell", "bash", "wsl"]
+            ):
                 logging.info("[Lookback] Terminal active -- skipping lookback context capture.")
                 return ""
 
@@ -1066,8 +1143,13 @@ class GlideTextApp(ctk.CTk):
             except Exception:
                 pass
 
-        logging.info(f"[Lookback] Captured: {repr(pre_text)}")
-        return pre_text
+        bounded_text = sanitize_and_bound_cursor_text(
+            pre_text,
+            is_sensitive=is_sensitive,
+            app_category=app_category,
+        )
+        logging.info(f"[Lookback] Captured bounded lookback ({len(bounded_text)} chars).")
+        return bounded_text
 
     def _swap_text(self, old_text: str, new_text: str) -> bool:
         """Safe swap using Adaptive Suffix Diffing:
@@ -1478,26 +1560,43 @@ class GlideTextApp(ctk.CTk):
     # -- Hotkey Handlers --
 
     def _on_key_press(self, _event):
-        """Right Alt pressed: start push-to-talk recording."""
+        """Right Alt pressed: start a push-to-talk DictationSession."""
         if self.is_continuous_mode:
             return
 
         with self._lock:
-            if self.recorder.is_recording or getattr(self, "_is_starting_recording", False) or self._is_processing:
+            if (
+                self.recorder.is_recording
+                or getattr(self, "_is_starting_recording", False)
+                or self._is_processing
+                or (self._active_session is not None and self._active_session.is_active_capture)
+            ):
                 return
             self._is_starting_recording = True
             self._stop_pending = False
 
         # Capture target window immediately at key-down
+        self._lookback_context = ""
         context = get_active_window_info()
         self._target_hwnd = context.get("hwnd")
+
+        # Create independent push-to-talk DictationSession
+        session = DictationSession(
+            mode=SessionMode.PUSH_TO_TALK,
+            context_info=context,
+            target_hwnd=self._target_hwnd,
+            style=self._active_style,
+        )
+        session.start()
+        with self._lock:
+            self._active_session = session
 
         # Trigger TCP/TLS socket pre-warming in a background thread if key available
         if self.brain.api_key:
             threading.Thread(target=self.brain.pre_warm_gemini_connection, daemon=True).start()
 
         # Optimistic UI update
-        self._set_status("recording")
+        self._set_status("recording", "Push-to-talk active -- release [Right Alt] to finish")
 
         # Load dynamic vocabulary for the current active app in a background thread
         self.brain.reload_vocabulary(context)
@@ -1505,19 +1604,31 @@ class GlideTextApp(ctk.CTk):
         def _async_start():
             set_thread_priority(2)  # HIGHEST priority
             try:
-                self.recorder.start()
+                self.recorder.start(
+                    on_speech_callback=session.on_speech_detected,
+                    chunk_callback=session.append_audio_chunk,
+                )
                 if not self.recorder.is_recording:
                     raise RuntimeError("Audio stream failed to initialize")
 
                 # Capture lookback context AFTER recording starts (and on background thread)
-                self._lookback_context = self._capture_lookback_context(context)
+                captured = self._capture_lookback_context(context)
+                session.set_lookback_context(captured)
+                self._lookback_context = session.lookback_context
 
+                should_stop = False
                 with self._lock:
                     if self._stop_pending:
                         self._stop_pending = False
-                        self._async_stop()
+                        should_stop = True
+                if should_stop:
+                    self._async_stop(session)
             except Exception as e:
                 logging.error(f"[GUI] Recording start error: {e}")
+                session.fail_session(f"Recording start error: {e}")
+                with self._lock:
+                    if self._active_session is session:
+                        self._active_session = None
                 self._set_status("warning", f"Recording failed: {e}")
                 self.after(3000, lambda: self._set_status("ready"))
             finally:
@@ -1526,7 +1637,7 @@ class GlideTextApp(ctk.CTk):
         threading.Thread(target=_async_start, daemon=True).start()
 
     def _on_key_release(self, _event):
-        """Right Alt released: stop push-to-talk recording."""
+        """Right Alt released: finalize push-to-talk DictationSession."""
         if self.is_continuous_mode:
             return
         
@@ -1534,25 +1645,52 @@ class GlideTextApp(ctk.CTk):
             if getattr(self, "_is_starting_recording", False):
                 self._stop_pending = True
                 return
-            if not self.recorder.is_recording:
+            if not self.recorder.is_recording and (
+                self._active_session is None or not self._active_session.is_active_capture
+            ):
                 return
+            session = self._active_session
 
-        self._async_stop()
+        self._async_stop(session)
 
-    def _async_stop(self):
+    def _async_stop(self, session: DictationSession | None = None):
+        """Finalize the active push-to-talk session and enqueue it for processing."""
         try:
+            with self._lock:
+                target_session = session or self._active_session
+                if target_session is not None and not target_session.is_active_capture:
+                    return
+                if self._active_session is target_session:
+                    self._active_session = None
+
             self._set_status("transcribing")
             # Capture active window context on stop trigger
             context = get_active_window_info()
             if getattr(self, "_target_hwnd", None):
                 context["target_hwnd"] = self._target_hwnd
             self._target_hwnd = None
+
             audio_path = self.recorder.stop()
+
+            if target_session is None:
+                target_session = DictationSession(
+                    mode=SessionMode.PUSH_TO_TALK,
+                    context_info=context,
+                    style=self._active_style,
+                )
+                target_session.start()
+
+            target_session.refresh_context_snapshot(updated_context=context)
+
+            if not target_session.finalize(audio_path=audio_path):
+                return
+
             if audio_path is None:
+                target_session.complete_session(reason="no_audio")
                 self._set_status("ready")
                 return
 
-            self._pipeline_queue.put((audio_path, context))
+            self._pipeline_queue.put(target_session)
         except Exception as e:
             logging.error(f"[GUI] Recording stop error: {e}")
             self._set_status("warning", f"Stop failed: {e}")
@@ -1561,24 +1699,52 @@ class GlideTextApp(ctk.CTk):
     # -- Continuous Dictation Toggle --
 
     def _toggle_continuous_recording(self):
-        """Toggle hands-free continuous dictation on/off (Ctrl+Shift+A)."""
+        """Toggle hands-free continuous dictation session on/off (Ctrl+Shift+A).
+
+        - If no continuous session exists -> start a new continuous DictationSession
+        - If a continuous session exists -> explicitly finalize the session and process
+        """
         with self._lock:
             if self._is_processing or getattr(self, "_is_starting_recording", False):
                 return
 
         if self.is_continuous_mode:
-            # STOP continuous session
-            logging.info("[GUI] Continuous mode: OFF")
+            # EXPLICIT USER STOP: Finalize continuous session
+            logging.info("[GUI] Continuous mode: OFF (explicit user stop)")
             self.is_continuous_mode = False
             try:
+                with self._lock:
+                    session = self._active_session
+                    self._active_session = None
+
+                if session is not None and not session.is_active_capture:
+                    return
+
+                self._set_status("transcribing")
                 context = get_active_window_info()
                 if getattr(self, "_target_hwnd", None):
                     context["target_hwnd"] = self._target_hwnd
                 self._target_hwnd = None
+
                 audio_path = self.recorder.stop()
+
+                if session is None:
+                    session = DictationSession(
+                        mode=SessionMode.CONTINUOUS,
+                        context_info=context,
+                        style=self._active_style,
+                    )
+                    session.start()
+
+                session.refresh_context_snapshot(updated_context=context)
+
+                if not session.finalize(audio_path=audio_path):
+                    return
+
                 if audio_path is not None:
-                    self._pipeline_queue.put((audio_path, context))
+                    self._pipeline_queue.put(session)
                 else:
+                    session.complete_session(reason="no_audio")
                     self._set_status("ready")
             except Exception as e:
                 logging.error(f"[GUI] Continuous stop error: {e}")
@@ -1586,34 +1752,60 @@ class GlideTextApp(ctk.CTk):
                 self.after(3000, lambda: self._set_status("ready"))
         else:
             # START continuous session
-            if self.recorder.is_recording:
+            if self.recorder.is_recording or (
+                self._active_session is not None and self._active_session.is_active_capture
+            ):
                 return
 
-            logging.info("[GUI] Continuous mode: ON (VAD auto-stop enabled)")
+            logging.info("[GUI] Continuous mode: ON (VAD speech/pause activity detection enabled)")
             self.is_continuous_mode = True
             self._is_starting_recording = True
+            self._lookback_context = ""
 
             context = get_active_window_info()
             self._target_hwnd = context.get("hwnd")
 
+            session = DictationSession(
+                mode=SessionMode.CONTINUOUS,
+                context_info=context,
+                target_hwnd=self._target_hwnd,
+                style=self._active_style,
+            )
+            session.start()
+            with self._lock:
+                self._active_session = session
+
             if self.brain.api_key:
                 threading.Thread(target=self.brain.pre_warm_gemini_connection, daemon=True).start()
 
+            self.brain.reload_vocabulary(context)
+
             # Optimistic UI update
-            self._set_status("recording", "Continuous mode ON -- will auto-stop on silence")
+            self._set_status("recording", "Continuous session active -- press Ctrl+Shift+A to finish")
 
             def _async_start_continuous():
                 set_thread_priority(2)  # HIGHEST priority
                 try:
-                    self.recorder.start(auto_stop_callback=self._on_vad_auto_stop)
+                    self.recorder.start(
+                        auto_stop_callback=self._on_vad_auto_stop,
+                        on_speech_callback=self._on_vad_speech_activity,
+                        on_silence_callback=self._on_vad_silence_activity,
+                        chunk_callback=session.append_audio_chunk,
+                    )
                     if not self.recorder.is_recording:
                         raise RuntimeError("Audio stream failed to initialize")
 
                     # Capture lookback context AFTER recording starts (and on background thread)
-                    self._lookback_context = self._capture_lookback_context(context)
+                    captured = self._capture_lookback_context(context)
+                    session.set_lookback_context(captured)
+                    self._lookback_context = session.lookback_context
                 except Exception as e:
                     logging.error(f"[GUI] Continuous recording start error: {e}")
                     self.is_continuous_mode = False
+                    session.fail_session(f"Continuous recording start error: {e}")
+                    with self._lock:
+                        if self._active_session is session:
+                            self._active_session = None
                     self._set_status("warning", f"Recording failed: {e}")
                     self.after(3000, lambda: self._set_status("ready"))
                 finally:
@@ -1621,17 +1813,41 @@ class GlideTextApp(ctk.CTk):
 
             threading.Thread(target=_async_start_continuous, daemon=True).start()
 
-    def _on_vad_auto_stop(self, audio_path: str):
-        """Callback from VAD when silence is detected in continuous mode."""
-        self.is_continuous_mode = False
-        if audio_path:
-            context = get_active_window_info()
-            if getattr(self, "_target_hwnd", None):
-                context["target_hwnd"] = self._target_hwnd
-            self._target_hwnd = None
-            self._pipeline_queue.put((audio_path, context))
-        else:
-            self._set_status("ready")
+    def _on_vad_speech_activity(self):
+        """Callback from VAD when speech starts or resumes during a session."""
+        session = self._active_session
+        if session is not None and session.is_active_capture:
+            if session.on_speech_detected() and self.is_continuous_mode:
+                self._set_status(
+                    "recording",
+                    "Continuous session: Listening... (Ctrl+Shift+A to finish)",
+                )
+
+    def _on_vad_silence_activity(self, silence_duration: float = 0.0):
+        """Callback from VAD when silence/thinking pause occurs after speech."""
+        session = self._active_session
+        if session is not None and session.is_active_capture:
+            if session.on_silence_detected(silence_duration) and self.is_continuous_mode:
+                self._set_status(
+                    "paused",
+                    "Paused (thinking)... Speak to continue, or Ctrl+Shift+A to finish",
+                )
+
+    def _on_vad_auto_stop(self, audio_path: str | None = None):
+        """Replaced semantic role: VAD silence activity notification in continuous mode.
+
+        CRITICAL: Silence in continuous mode means the user is thinking/paused,
+        NOT that the dictation session has ended. This method updates the session
+        and UI to the PAUSED state and NEVER stops or finalizes the session.
+        """
+        session = self._active_session
+        if session is not None and session.is_active_capture:
+            session.on_silence_detected()
+        if self.is_continuous_mode:
+            self._set_status(
+                "paused",
+                "Paused (thinking)... Speak to continue, or Ctrl+Shift+A to finish",
+            )
 
     # -- Editing Command Executor --
 
@@ -1689,34 +1905,134 @@ class GlideTextApp(ctk.CTk):
                 task = self._pipeline_queue.get()
                 if task is None:
                     break
-                audio_path, context = task
-                self._run_pipeline(audio_path, context)
+                if isinstance(task, DictationSession):
+                    self._run_session_pipeline(task)
+                else:
+                    audio_path, context = task
+                    self._run_pipeline(audio_path, context)
             except Exception as e:
                 logging.error(f"[GUI] Pipeline worker error: {e}")
             finally:
                 self._pipeline_queue.task_done()
 
     def _run_pipeline(self, audio_path: str, context: dict):
-        """Full dictation pipeline: transcribe -> polish -> inject."""
+        """Compatibility wrapper that wraps a raw (audio_path, context) tuple in a DictationSession."""
+        session = DictationSession(
+            mode=SessionMode.PUSH_TO_TALK,
+            context_info=context,
+            style=self._active_style,
+            lookback_context=getattr(self, "_lookback_context", ""),
+        )
+        self._lookback_context = ""
+        session.start()
+        session.finalize(audio_path=audio_path)
+        self._run_session_pipeline(session)
+
+    def _run_session_pipeline(self, session: DictationSession):
+        """Full session dictation pipeline: transcribe -> polish -> inject (strictly once per session)."""
+        if session is None:
+            return
+
         with self._lock:
-            if self._is_processing:
-                logging.info("[GUI] Pipeline busy, re-queuing audio task...")
-                self._pipeline_queue.put((audio_path, context))
-                time.sleep(0.1)
+            if (
+                session.session_id in self._processed_session_ids
+                or session.is_cancelled
+                or session.is_injected
+                or session.state in (SessionState.DONE, SessionState.ERROR)
+            ):
+                logging.info(
+                    f"[GUI] Session {session.session_id[:8]} already processed or invalid; preventing duplicate execution."
+                )
                 return
             self._is_processing = True
+            self._processed_session_ids.add(session.session_id)
+
+        audio_path = session.audio_path
+        snapshot = session.refresh_context_snapshot(
+            style=session.style or self._active_style
+        )
+        context = session.context_info
+        self._lookback_context = ""
+        in_memory_audio: Optional[np.ndarray] = None
 
         try:
+            if not audio_path:
+                in_memory_audio = session.get_concatenated_audio()
+                if in_memory_audio is None or len(in_memory_audio) < 4800:
+                    session.complete_session(reason="no_audio")
+                    self._set_status("ready")
+                    return
+
+            if session.is_cancelled:
+                return
+
+            # 1. TRANSCRIBING (guarded to run once)
+            if not session.begin_transcription():
+                return
+
             self._set_status("transcribing")
 
-            if context and context.get("app_hint"):
-                logging.info(f"[GUI] Active context: {context['app_hint']}")
+            logging.info(
+                f"[GUI] Active context: {snapshot.app_name} "
+                f"(category={snapshot.app_category.value}, coding_mode={snapshot.coding_mode})"
+            )
 
-            # 1. Run local ASR immediately (low perceived latency)
-            raw_text = self.brain._offline_transcribe(audio_path, context)
+            # Run local ASR immediately (privacy-first: raw audio stays local)
+            try:
+                raw_text = self.brain._offline_transcribe(
+                    audio_path=audio_path,
+                    context_info=context,
+                    session_id=session.session_id,
+                    context_snapshot=snapshot,
+                    audio_array=in_memory_audio,
+                    cancel_check=lambda: session.is_cancelled,
+                )
+            except TypeError:
+                try:
+                    raw_text = self.brain._offline_transcribe(
+                        audio_path,
+                        context,
+                        session_id=session.session_id,
+                        context_snapshot=snapshot,
+                    )
+                except TypeError:
+                    try:
+                        raw_text = self.brain._offline_transcribe(
+                            audio_path, context, session_id=session.session_id
+                        )
+                    except TypeError:
+                        raw_text = self.brain._offline_transcribe(audio_path, context)
+
+            if session.is_cancelled:
+                return
+
+            session.complete_transcription(raw_text)
+
+            # Free in-memory audio buffers immediately to bound RAM
+            session.release_audio_buffers()
+            in_memory_audio = None
             
             if not raw_text:
+                session.complete_session(reason="no_speech_detected")
                 self._set_status("ready", "No speech detected.")
+                return
+
+            # Check safe Voice Command layer (scratch that, delete that, undo last dictation, etc.)
+            from voice_commands import parse_voice_command, GLOBAL_VOICE_COMMAND_EXECUTOR, GLOBAL_INSERTION_HISTORY
+            voice_cmd = parse_voice_command(raw_text)
+            if voice_cmd:
+                target_hwnd = context.get("target_hwnd") or context.get("hwnd")
+                cmd_res = GLOBAL_VOICE_COMMAND_EXECUTOR.execute_command(voice_cmd, target_hwnd=target_hwnd)
+                session.complete_session(
+                    reason="voice_command",
+                    command=voice_cmd.command_type.value,
+                    executed=cmd_res.executed,
+                    deleted_len=len(cmd_res.deleted_text),
+                )
+                if cmd_res.executed:
+                    self._set_status("ready", cmd_res.message)
+                else:
+                    self._set_status("ready", cmd_res.message or "Voice command skipped")
                 return
 
             # Optional: dynamic vocabulary addition if user explicitly said "add <word> to my dictionary"
@@ -1725,27 +2041,64 @@ class GlideTextApp(ctk.CTk):
             if command and command.startswith("dict_add_"):
                 word_to_add = command[len("dict_add_"):]
                 self.brain._add_to_dictionary(word_to_add)
+                session.complete_session(reason="dictionary_command")
                 self._set_status("ready", f"Learned: '{word_to_add}' added to memory!")
                 return
 
-            # Stage 2: Pure Speech-to-Text Polish (Wispr Flow style)
+            if session.is_cancelled:
+                return
+
+            # 2. POLISHING (guarded to run once)
             # Priority 1: FreeLLMAPI -> Priority 2: Gemini -> Priority 3: Local LLM -> Raw transcript
+            if not session.begin_polishing():
+                return
+
             self._set_status("processing", "Polishing transcription...")
-            pre_text = getattr(self, "_lookback_context", "")
-            self._lookback_context = ""
-            
-            pipeline_res = self.brain.polish_with_provider_fallbacks(
-                raw_text=raw_text,
-                style=self._active_style,
-                context_info=context,
-                pre_text=pre_text,
+            snapshot = session.refresh_context_snapshot(
+                style=session.style or self._active_style
             )
-            polished_text = pipeline_res.text or raw_text
+            pre_text = snapshot.bounded_cursor_text
+
+            try:
+                try:
+                    pipeline_res = self.brain.polish_with_provider_fallbacks(
+                        raw_text=raw_text,
+                        style=session.style or self._active_style,
+                        context_info=context,
+                        pre_text=pre_text,
+                        context_snapshot=snapshot,
+                    )
+                except TypeError:
+                    pipeline_res = self.brain.polish_with_provider_fallbacks(
+                        raw_text=raw_text,
+                        style=session.style or self._active_style,
+                        context_info=context,
+                        pre_text=pre_text,
+                    )
+                polished_text = pipeline_res.text or raw_text
+                provider_used = pipeline_res.provider
+                is_fallback = pipeline_res.is_fallback
+            except Exception as llm_err:
+                logging.warning(
+                    f"[GUI] LLM polishing failed ({llm_err}); preserving user's spoken words with raw fallback."
+                )
+                polished_text = session.corrected_transcript or raw_text
+                provider_used = "raw_fallback"
+                is_fallback = True
+
+            if session.is_cancelled:
+                return
+
+            session.complete_polishing(
+                polished_text=polished_text,
+                provider=provider_used,
+                is_fallback=is_fallback,
+            )
 
             # Update engine mode badge to reflect the actual provider used
             self.after(
                 0,
-                lambda p=pipeline_res.provider, fb=pipeline_res.is_fallback: self._update_engine_mode_ui(p, is_fallback=fb)
+                lambda p=provider_used, fb=is_fallback: self._update_engine_mode_ui(p, is_fallback=fb)
             )
 
             polished_expanded = self.injector.expand_snippets(polished_text)
@@ -1754,20 +2107,41 @@ class GlideTextApp(ctk.CTk):
             # Terminal Safety Guard: If user is focused on a terminal or command prompt,
             # ensure no unprompted newlines are injected that could accidentally execute shell commands.
             app_hint = context.get("app_hint", "") if context else ""
-            if any(term in app_hint.lower() for term in ["terminal", "cmd", "powershell", "bash", "wsl"]):
+            if snapshot.single_line_output or any(
+                term in app_hint.lower() for term in ["terminal", "cmd", "powershell", "bash", "wsl"]
+            ):
                 normalized_polished = normalized_polished.replace("\n", " ").strip()
 
-            # Direct Injection: Type the polished text at the cursor position
+            session.polished_text = normalized_polished
+
+            # 3. INJECTING (guarded to run once)
+            # Before injection verify:
+            # 1. session exists
+            # 2. session has valid final text
+            # 3. session is not already injected
+            # 4. session is in an injectable state
+            if not session.is_injectable or not session.begin_injection():
+                logging.debug(
+                    f"[GUI] Session {session.session_id[:8]} cannot inject: "
+                    f"is_injectable={session.is_injectable}, state={session.state.value}."
+                )
+                return
+
             self._set_status("typing", "Typing polished text...")
             target_hwnd = context.get("target_hwnd") or context.get("hwnd")
             inject_res = self.injector.inject(normalized_polished, target_hwnd=target_hwnd)
 
             if inject_res.success:
+                session.mark_injected(True)
                 self._last_injected_text = inject_res.injected_text
+                GLOBAL_INSERTION_HISTORY.record_insertion(
+                    session_id=session.session_id,
+                    text=normalized_polished,
+                    target_hwnd=target_hwnd,
+                )
             else:
                 logging.warning(f"[GUI] Text injection skipped or failed: {inject_res.error}")
                 self._set_status("warning", f"Injection: {inject_res.error}")
-
 
             # 4. Log final polished text to vault
             ts = self.vault.add_entry(normalized_polished, raw_text)
@@ -1777,10 +2151,16 @@ class GlideTextApp(ctk.CTk):
             )
             self.after(0, self._refresh_telemetry_ui)
 
+            session.complete_session(
+                reason="ok",
+                injected=bool(inject_res.success),
+                method=getattr(inject_res, "method", "unknown"),
+            )
             self._set_status("ready")
 
         except Exception as e:
             logging.error(f"[GUI] Pipeline error: {e}")
+            session.fail_session(str(e))
             err_msg = str(e)
             is_critical_key_error = "API_KEY_INVALID" in err_msg or "API key" in err_msg or "keyring" in err_msg or "403" in err_msg
             
@@ -1797,12 +2177,7 @@ class GlideTextApp(ctk.CTk):
                 self.after(5000, lambda: self._set_status("ready"))
 
         finally:
-            # Clean up temp audio file
-            try:
-                if audio_path and os.path.exists(audio_path):
-                    os.remove(audio_path)
-            except OSError:
-                pass
+            session.cleanup_audio()
             with self._lock:
                 self._is_processing = False
 
