@@ -444,7 +444,29 @@ class TestPlatformCompat(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("Desktop .lnk shortcuts are only applicable to Windows", result.stdout)
 
+    def test_gui_backend_hotkey_initialization(self):
+        """GlideTextApp._initialize_backend must safely read hotkeys from _cfg without colliding with Tk self.config method."""
+        from gui_app import GlideTextApp
+        app = MagicMock(spec=GlideTextApp)
+        # Recreate the exact Tkinter method collision where self.config is a callable
+        app.config = lambda *args, **kwargs: None
+        app._cfg = {"hotkey_ptt": "right alt", "hotkey_continuous": "ctrl + shift + a"}
+        app.brain = MagicMock()
+        app.recorder = MagicMock()
+        app._set_status = MagicMock()
+        app.after = MagicMock()
+
+        with patch("gui_app.keyboard") as mock_kb:
+            mock_kb.wait.side_effect = Exception("Stop thread")
+            GlideTextApp._initialize_backend(app)
+
+            mock_kb.on_press_key.assert_called_with("right alt", app._on_key_press, suppress=False)
+            mock_kb.on_release_key.assert_called_with("right alt", app._on_key_release, suppress=False)
+            mock_kb.add_hotkey.assert_called_with("ctrl + shift + a", app._toggle_continuous_recording)
+            app._set_status.assert_called_with("ready")
+
 
 if __name__ == "__main__":
+
 
     unittest.main()

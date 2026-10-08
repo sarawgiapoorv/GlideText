@@ -1558,8 +1558,9 @@ class GlideTextApp(ctk.CTk):
         # Stage 3 -- Register hotkeys
         try:
             default_ptt = "right alt" if sys.platform == "win32" else "right option"
-            ptt_key = getattr(self, "config", {}).get("hotkey_ptt") or default_ptt
-            continuous_combo = getattr(self, "config", {}).get("hotkey_continuous") or "ctrl + shift + a"
+            cfg = getattr(self, "_cfg", {}) if isinstance(getattr(self, "_cfg", None), dict) else {}
+            ptt_key = (cfg.get("hotkey_ptt") or default_ptt).strip().lower()
+            continuous_combo = (cfg.get("hotkey_continuous") or "ctrl + shift + a").strip().lower()
 
             keyboard.on_press_key(
                 ptt_key, self._on_key_press, suppress=False,
