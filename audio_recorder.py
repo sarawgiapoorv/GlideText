@@ -37,19 +37,25 @@ except ImportError:
 # Optional: pycaw for audio ducking
 # ---------------------------------------------------------------------------
 try:
-    from pycaw.pycaw import AudioUtilities
-    HAS_PYCAW = True
-except ImportError:
+    if sys.platform == "win32":
+        from pycaw.pycaw import AudioUtilities
+        HAS_PYCAW = True
+    else:
+        HAS_PYCAW = False
+except Exception:
     HAS_PYCAW = False
 
 # ---------------------------------------------------------------------------
 # Optional: win32gui for active window detection
 # ---------------------------------------------------------------------------
 try:
-    import ctypes
-    import ctypes.wintypes
-    HAS_WIN32 = True
-except ImportError:
+    if sys.platform == "win32":
+        import ctypes
+        import ctypes.wintypes
+        HAS_WIN32 = True
+    else:
+        HAS_WIN32 = False
+except Exception:
     HAS_WIN32 = False
 
 
@@ -95,78 +101,20 @@ VAD_MIN_SPEECH_DURATION = 0.4   # Minimum speech duration before VAD kicks in
 # ═══════════════════════════════════════════════════════════════
 
 def get_active_window_info() -> dict:
-    """Detect the currently focused Windows application.
+    """Detect the currently focused application and window context.
 
     Returns a dict with keys:
         title                -- window title string (cleared if sensitive context)
-        exe_name             -- executable basename (e.g. 'Code.exe', 'chrome.exe')
-        app_hint             -- simplified privacy-safe app name for context prompts
+        exe_name             -- executable/app basename (e.g. 'Code.exe', 'Terminal.app')
+        app_hint             -- simplified privacy-safe app name / bundle ID
         app_category         -- canonical AppCategory string ('IDE/code editor', 'terminal', etc.)
         is_sensitive_context -- True if password manager / credential prompt detected
+        hwnd                 -- opaque window token (Win32 HWND or macOS token)
 
-    Returns safe empty/unknown values on failure or non-Windows platforms.
+    Returns safe empty/unknown values on failure or unsupported platforms.
     """
-    from context_snapshot import AppCategory, classify_application
-
-    result = {
-        "title": "",
-        "exe_name": "",
-        "app_hint": "",
-        "app_category": AppCategory.UNKNOWN.value,
-        "is_sensitive_context": False,
-    }
-    if not HAS_WIN32:
-        return result
-
-    try:
-        user32 = ctypes.windll.user32
-        hwnd = user32.GetForegroundWindow()
-        result["hwnd"] = hwnd
-
-        # Window title (used transiently for classification; never leaked in prompts)
-        length = user32.GetWindowTextLengthW(hwnd)
-        buf = ctypes.create_unicode_buffer(length + 1)
-        user32.GetWindowTextW(hwnd, buf, length + 1)
-        raw_title = buf.value or ""
-
-        # Process executable
-        pid = ctypes.wintypes.DWORD()
-        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        kernel32 = ctypes.windll.kernel32
-        h_process = kernel32.OpenProcess(
-            PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value
-        )
-        exe_name = ""
-        if h_process:
-            exe_buf = ctypes.create_unicode_buffer(512)
-            size = ctypes.wintypes.DWORD(512)
-            kernel32.QueryFullProcessImageNameW(
-                h_process, 0, exe_buf, ctypes.byref(size)
-            )
-            kernel32.CloseHandle(h_process)
-            exe_path = exe_buf.value
-            exe_name = os.path.basename(exe_path) if exe_path else ""
-            result["exe_name"] = exe_name
-
-        category, safe_app_name, is_sensitive = classify_application(
-            exe_name=exe_name,
-            window_title=raw_title,
-            app_hint="",
-        )
-        result["app_category"] = category.value
-        result["is_sensitive_context"] = is_sensitive
-        if category != AppCategory.UNKNOWN:
-            result["app_hint"] = safe_app_name
-        else:
-            result["app_hint"] = exe_name.replace(".exe", "") if exe_name else ""
-        # Never retain raw window title if sensitive context detected
-        result["title"] = "" if is_sensitive else raw_title
-    except Exception:
-        pass  # Never crash on context detection failure
-
-    return result
+    import platform_compat
+    return platform_compat.get_active_window_info()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -174,82 +122,20 @@ def get_active_window_info() -> dict:
 # ═══════════════════════════════════════════════════════════════
 
 class AudioDucker:
-    """Ducks system master volume during recording to prevent bleed-through."""
+    """Ducks playback volume during recording to prevent bleed-through."""
 
     def __init__(self):
-        self._lock = threading.Lock()
-        self._is_ducked = False
-        self._original_volumes = {}
+        pass
 
     def duck(self):
-        """Duck active application volumes to 10% asynchronously."""
-        if not HAS_PYCAW:
-            return
-        threading.Thread(target=self._duck_impl, daemon=True).start()
-
-    def _duck_impl(self):
-        with self._lock:
-            if self._is_ducked:
-                return
-            import comtypes
-            try:
-                comtypes.CoInitialize()
-                try:
-                    sessions = AudioUtilities.GetAllSessions()
-                    self._original_volumes.clear()
-                    
-                    for session in sessions:
-                        volume = session.SimpleAudioVolume
-                        if session.Process:
-                            proc_id = session.Process.pid
-                            vol = volume.GetMasterVolume()
-                            self._original_volumes[proc_id] = vol
-                            
-                            # Duck volume to 10%
-                            ducked_vol = max(0.0, vol * 0.10)
-                            volume.SetMasterVolume(ducked_vol, None)
-                    
-                    self._is_ducked = True
-                except Exception as e:
-                    logging.info(f"  [AudioDucker] Duck failed: {e}")
-            finally:
-                try:
-                    comtypes.CoUninitialize()
-                except Exception:
-                    pass
+        """Duck active application or system playback volume asynchronously."""
+        import platform_compat
+        platform_compat.duck_audio()
 
     def restore(self):
-        """Restore application volumes asynchronously."""
-        if not HAS_PYCAW:
-            return
-        threading.Thread(target=self._restore_impl, daemon=True).start()
-
-    def _restore_impl(self):
-        with self._lock:
-            if not self._is_ducked:
-                return
-            import comtypes
-            try:
-                comtypes.CoInitialize()
-                try:
-                    sessions = AudioUtilities.GetAllSessions()
-                    
-                    for session in sessions:
-                        volume = session.SimpleAudioVolume
-                        if session.Process:
-                            proc_id = session.Process.pid
-                            if proc_id in self._original_volumes:
-                                volume.SetMasterVolume(self._original_volumes[proc_id], None)
-                    
-                    self._original_volumes.clear()
-                    self._is_ducked = False
-                except Exception as e:
-                    logging.info(f"  [AudioDucker] Restore failed: {e}")
-            finally:
-                try:
-                    comtypes.CoUninitialize()
-                except Exception:
-                    pass
+        """Restore application or system playback volume asynchronously."""
+        import platform_compat
+        platform_compat.restore_audio()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -324,13 +210,9 @@ class AudioRecorder:
             self._warmed_up = True
 
         def _warmup_impl():
-            if sys.platform == "win32":
-                try:
-                    import ctypes
-                    # Run warmup at below normal priority to not impact GUI thread
-                    ctypes.windll.kernel32.SetThreadPriority(ctypes.windll.kernel32.GetCurrentThread(), -1)
-                except Exception:
-                    pass
+            import platform_compat
+            # Run warmup at below normal priority to not impact GUI thread
+            platform_compat.set_thread_priority(-1)
 
             # Pre-warm PortAudio by querying device info
             if HAS_SOUNDDEVICE and sd is not None:
@@ -399,14 +281,9 @@ class AudioRecorder:
         session state and UI diagnostics, but NEVER stops the audio stream
         or finalizes a continuous dictation session on silence.
         """
-        import sys
-        if sys.platform == "win32":
-            try:
-                import ctypes
-                # Set thread priority to HIGHEST for real-time monitoring
-                ctypes.windll.kernel32.SetThreadPriority(ctypes.windll.kernel32.GetCurrentThread(), 2)
-            except Exception as e:
-                logging.error(f"  [VAD] Failed to set thread priority: {e}")
+        import platform_compat
+        # Set thread priority to HIGHEST for real-time monitoring
+        platform_compat.set_thread_priority(2)
 
         vad = getattr(self, "_vad_instance", None)
         if vad is None and HAS_VAD:

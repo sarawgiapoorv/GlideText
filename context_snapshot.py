@@ -30,7 +30,8 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
+import platform_compat
 
 # Maximum number of characters kept from surrounding cursor lookback
 MAX_CURSOR_LOOKBACK_CHARS: int = 250
@@ -280,6 +281,191 @@ _BROWSER_EXECUTABLES: dict[str, str] = {
     "zen.exe": "Zen Browser",
 }
 
+# macOS Sensitive / Password Manager deny list (app names and bundle IDs)
+_MACOS_SENSITIVE_APPS: frozenset[str] = frozenset({
+    "1password",
+    "com.1password.1password",
+    "com.agilebits.onepassword-osx",
+    "com.agilebits.onepassword4",
+    "com.agilebits.onepassword7",
+    "bitwarden",
+    "com.bitwarden.desktop",
+    "dashlane",
+    "com.dashlane.dashlane",
+    "com.dashlane.dashlanemac",
+    "keychain access",
+    "com.apple.keychainaccess",
+    "securityagent",
+    "com.apple.securityagent",
+    "loginwindow",
+    "com.apple.loginwindow",
+    "coreauthd",
+    "com.apple.coreauthd",
+    "pinentry-mac",
+    "org.gpgtools.pinentry-mac",
+    "keepassxc",
+    "org.keepassxc.keepassxc",
+    "lastpass",
+    "com.lastpass.lastpass",
+    "enpass",
+    "in.sinew.enpass-desktop",
+})
+
+# macOS application classification lookup tables (bundle IDs and app names)
+_MACOS_IDE_APPS: dict[str, str] = {
+    "com.microsoft.vscode": "VS Code",
+    "code": "VS Code",
+    "com.microsoft.vscodeinsiders": "VS Code Insiders",
+    "code - insiders": "VS Code Insiders",
+    "com.todesktop.230313mzl4w4u92": "Cursor IDE",
+    "cursor": "Cursor IDE",
+    "com.exafunction.windsurf": "Windsurf IDE",
+    "windsurf": "Windsurf IDE",
+    "com.jetbrains.pycharm": "PyCharm",
+    "com.jetbrains.pycharm.ce": "PyCharm",
+    "pycharm": "PyCharm",
+    "com.jetbrains.intellij": "IntelliJ IDEA",
+    "com.jetbrains.intellij.ce": "IntelliJ IDEA",
+    "idea": "IntelliJ IDEA",
+    "com.jetbrains.webstorm": "WebStorm",
+    "webstorm": "WebStorm",
+    "com.jetbrains.clion": "CLion",
+    "clion": "CLion",
+    "com.jetbrains.goland": "GoLand",
+    "goland": "GoLand",
+    "com.jetbrains.rider": "Rider",
+    "rider": "Rider",
+    "com.google.android.studio": "Android Studio",
+    "android studio": "Android Studio",
+    "com.apple.dt.xcode": "Xcode",
+    "xcode": "Xcode",
+    "com.sublimetext.4": "Sublime Text",
+    "com.sublimetext.3": "Sublime Text",
+    "sublime text": "Sublime Text",
+    "dev.zed.zed": "Zed Editor",
+    "zed": "Zed Editor",
+    "org.vim.macvim": "MacVim",
+    "macvim": "MacVim",
+    "nvim": "Neovim",
+    "vim": "Vim",
+    "nova": "Nova",
+    "com.panic.nova": "Nova",
+    "fleet": "JetBrains Fleet",
+    "com.jetbrains.fleet": "JetBrains Fleet",
+}
+
+_MACOS_TERMINAL_APPS: dict[str, str] = {
+    "com.apple.terminal": "Terminal",
+    "terminal": "Terminal",
+    "terminal.app": "Terminal",
+    "com.googlecode.iterm2": "iTerm2",
+    "iterm2": "iTerm2",
+    "iterm": "iTerm2",
+    "dev.warp.warp-stable": "Warp Terminal",
+    "warp": "Warp Terminal",
+    "warp terminal": "Warp Terminal",
+    "org.alacritty": "Alacritty",
+    "alacritty": "Alacritty",
+    "net.kovidgoyal.kitty": "Kitty Terminal",
+    "kitty": "Kitty Terminal",
+    "com.github.wez.wezterm": "WezTerm",
+    "wezterm": "WezTerm",
+    "co.zeit.hyper": "Hyper Terminal",
+    "hyper": "Hyper Terminal",
+    "bash": "Bash Terminal",
+    "zsh": "Zsh Terminal",
+}
+
+_MACOS_EMAIL_APPS: dict[str, str] = {
+    "com.apple.mail": "Apple Mail",
+    "mail": "Apple Mail",
+    "com.microsoft.outlook": "Microsoft Outlook",
+    "outlook": "Microsoft Outlook",
+    "org.mozilla.thunderbird": "Mozilla Thunderbird",
+    "thunderbird": "Mozilla Thunderbird",
+    "com.superhuman.electron": "Superhuman Email",
+    "superhuman": "Superhuman Email",
+    "com.readdle.smartemail-mac": "Spark Mail",
+    "spark": "Spark Mail",
+    "com.mailspring.mailspring": "Mailspring",
+    "mailspring": "Mailspring",
+}
+
+_MACOS_SLACK_CHAT_APPS: dict[str, str] = {
+    "com.tinyspeck.slackmacgap": "Slack",
+    "slack": "Slack",
+    "com.hnc.discord": "Discord",
+    "discord": "Discord",
+    "ru.keepcoder.telegram": "Telegram",
+    "telegram": "Telegram",
+    "net.whatsapp.whatsapp": "WhatsApp",
+    "whatsapp": "WhatsApp",
+    "org.whispersystems.signal-desktop": "Signal",
+    "signal": "Signal",
+    "com.apple.mobilesms": "Apple Messages",
+    "messages": "Apple Messages",
+    "imessage": "Apple Messages",
+    "mattermost": "Mattermost",
+    "com.mattermost.desktop": "Mattermost",
+    "im.riot.app": "Element Chat",
+    "element": "Element Chat",
+}
+
+_MACOS_TEAMS_CHAT_APPS: dict[str, str] = {
+    "com.microsoft.teams": "Microsoft Teams",
+    "com.microsoft.teams2": "Microsoft Teams",
+    "teams": "Microsoft Teams",
+    "microsoft teams": "Microsoft Teams",
+}
+
+_MACOS_DOCUMENT_EDITOR_APPS: dict[str, str] = {
+    "com.apple.notes": "Apple Notes",
+    "notes": "Apple Notes",
+    "com.apple.textedit": "TextEdit",
+    "textedit": "TextEdit",
+    "com.apple.iwork.pages": "Pages",
+    "pages": "Pages",
+    "com.apple.iwork.keynote": "Keynote",
+    "keynote": "Keynote",
+    "com.apple.iwork.numbers": "Numbers",
+    "numbers": "Numbers",
+    "com.microsoft.word": "Microsoft Word",
+    "microsoft word": "Microsoft Word",
+    "com.microsoft.excel": "Microsoft Excel",
+    "microsoft excel": "Microsoft Excel",
+    "com.microsoft.powerpoint": "Microsoft PowerPoint",
+    "microsoft powerpoint": "Microsoft PowerPoint",
+    "notion.id": "Notion",
+    "notion": "Notion",
+    "md.obsidian": "Obsidian",
+    "obsidian": "Obsidian",
+    "scrivener": "Scrivener",
+    "typora": "Typora",
+    "logseq": "Logseq",
+    "com.adobe.reader": "Adobe Acrobat",
+    "adobe acrobat": "Adobe Acrobat",
+}
+
+_MACOS_BROWSER_APPS: dict[str, str] = {
+    "com.apple.safari": "Safari",
+    "safari": "Safari",
+    "com.google.chrome": "Google Chrome",
+    "google chrome": "Google Chrome",
+    "chrome": "Google Chrome",
+    "company.thebrowser.browser": "Arc Browser",
+    "arc": "Arc Browser",
+    "org.mozilla.firefox": "Mozilla Firefox",
+    "firefox": "Mozilla Firefox",
+    "com.brave.browser": "Brave Browser",
+    "brave": "Brave Browser",
+    "com.microsoft.edgemac": "Microsoft Edge",
+    "microsoft edge": "Microsoft Edge",
+    "com.operasoftware.opera": "Opera Browser",
+    "opera": "Opera Browser",
+    "com.vivaldi.vivaldi": "Vivaldi Browser",
+    "vivaldi": "Vivaldi Browser",
+}
+
 
 def is_sensitive_window(
     exe_name: Optional[str] = None,
@@ -287,10 +473,18 @@ def is_sensitive_window(
     app_hint: Optional[str] = None,
 ) -> bool:
     """Return True if the active window appears to be a password manager, credential
-    prompt, login/2FA screen, private browsing window, or secret/credential file.
+    prompt, login/2FA screen, private browsing window, secret/credential file, or macOS Secure Input.
     """
+    if platform_compat.is_secure_input_enabled():
+        return True
+
     exe_clean = (exe_name or "").strip().lower()
+    hint_clean = (app_hint or "").strip().lower()
+
     if exe_clean in _SENSITIVE_EXECUTABLES:
+        return True
+
+    if exe_clean in _MACOS_SENSITIVE_APPS or hint_clean in _MACOS_SENSITIVE_APPS:
         return True
 
     combined_text = f"{window_title or ''} {app_hint or ''}".strip()
@@ -319,14 +513,17 @@ def classify_application(
     try:
         exe_clean = (exe_name or "").strip().lower()
         title_clean = (window_title or "").strip()
-        hint_clean = (app_hint or "").strip()
+        hint_clean = (app_hint or "").strip().lower()
         sensitive = is_sensitive_window(exe_clean, title_clean, hint_clean)
 
-        # 1. Exact executable matches
+        # 1. Exact Windows executable matches
         if exe_clean in _TERMINAL_EXECUTABLES:
             return AppCategory.TERMINAL, _TERMINAL_EXECUTABLES[exe_clean], sensitive
 
         if exe_clean in _IDE_EXECUTABLES:
+            # Check for integrated terminal inside IDE
+            if any(t_kw in title_clean.lower() for t_kw in ("terminal", "bash", "zsh", "fish")):
+                return AppCategory.TERMINAL, f"{_IDE_EXECUTABLES[exe_clean]} (Terminal)", sensitive
             return AppCategory.IDE_CODE_EDITOR, _IDE_EXECUTABLES[exe_clean], sensitive
 
         if exe_clean in _TEAMS_CHAT_EXECUTABLES:
@@ -341,10 +538,32 @@ def classify_application(
         if exe_clean in _DOCUMENT_EDITOR_EXECUTABLES:
             return AppCategory.DOCUMENT_EDITOR, _DOCUMENT_EDITOR_EXECUTABLES[exe_clean], sensitive
 
-        # 2. Browser executables (check safe web-app category hints in title/app_hint without leaking title)
+        # 2. Exact macOS bundle ID or app name matches
+        for key in (hint_clean, exe_clean):
+            if not key:
+                continue
+            if key in _MACOS_TERMINAL_APPS:
+                return AppCategory.TERMINAL, _MACOS_TERMINAL_APPS[key], sensitive
+            if key in _MACOS_IDE_APPS:
+                if any(t_kw in title_clean.lower() for t_kw in ("terminal", "bash", "zsh", "fish")):
+                    return AppCategory.TERMINAL, f"{_MACOS_IDE_APPS[key]} (Terminal)", sensitive
+                return AppCategory.IDE_CODE_EDITOR, _MACOS_IDE_APPS[key], sensitive
+            if key in _MACOS_TEAMS_CHAT_APPS:
+                return AppCategory.TEAMS_CHAT, _MACOS_TEAMS_CHAT_APPS[key], sensitive
+            if key in _MACOS_SLACK_CHAT_APPS:
+                return AppCategory.SLACK_CHAT, _MACOS_SLACK_CHAT_APPS[key], sensitive
+            if key in _MACOS_EMAIL_APPS:
+                return AppCategory.EMAIL, _MACOS_EMAIL_APPS[key], sensitive
+            if key in _MACOS_DOCUMENT_EDITOR_APPS:
+                return AppCategory.DOCUMENT_EDITOR, _MACOS_DOCUMENT_EDITOR_APPS[key], sensitive
+
+        # 3. Browser executables / bundle IDs (Windows and macOS)
         combined_lower = f"{title_clean} {hint_clean}".lower()
-        if exe_clean in _BROWSER_EXECUTABLES:
-            browser_label = _BROWSER_EXECUTABLES[exe_clean]
+        is_browser = (exe_clean in _BROWSER_EXECUTABLES) or (
+            exe_clean in _MACOS_BROWSER_APPS or hint_clean in _MACOS_BROWSER_APPS
+        )
+        if is_browser:
+            browser_label = _BROWSER_EXECUTABLES.get(exe_clean) or _MACOS_BROWSER_APPS.get(hint_clean) or _MACOS_BROWSER_APPS.get(exe_clean) or "Web Browser"
             if any(k in combined_lower for k in ("gmail", "outlook", "proton mail", "protonmail", "yahoo mail", "icloud mail", "fastmail", "webmail")):
                 return AppCategory.EMAIL, f"{browser_label} (Email)", sensitive
             if any(k in combined_lower for k in ("microsoft teams", "teams.microsoft")):
@@ -357,7 +576,7 @@ def classify_application(
                 return AppCategory.IDE_CODE_EDITOR, f"{browser_label} (Web IDE)", sensitive
             return AppCategory.BROWSER_GENERAL, browser_label, sensitive
 
-        # 3. Heuristic fallback via `app_hint` or `exe_name` substrings when exe wasn't in exact table
+        # 4. Heuristic fallback via `app_hint` or `exe_name` substrings when exe wasn't in exact table
         probe = f"{exe_clean} {combined_lower}"
         if not probe.strip():
             return AppCategory.UNKNOWN, "Unknown Application", sensitive
@@ -537,7 +756,7 @@ class ContextSnapshot:
     app_name: str = "Unknown Application"
     exe_name: str = ""
     app_category: AppCategory = AppCategory.UNKNOWN
-    target_hwnd: Optional[int] = None
+    target_hwnd: Optional[Any] = None
     bounded_cursor_text: str = ""
     relevant_dictionaries: tuple[str, ...] = ("dictionary.json",)
     relevant_vocabulary: tuple[str, ...] = field(default_factory=tuple)

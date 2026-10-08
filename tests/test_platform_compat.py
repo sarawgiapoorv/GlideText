@@ -108,6 +108,114 @@ class TestPlatformCompat(unittest.TestCase):
             self.assertNotIn("pynput", req_names)
             self.assertNotIn("pyobjc-core", req_names)
 
+    def test_macos_app_classification(self):
+        from context_snapshot import AppCategory, classify_application
+
+        test_cases = [
+            ("Code", "com.microsoft.VSCode", AppCategory.IDE_CODE_EDITOR, "VS Code"),
+            ("Cursor", "com.todesktop.230313mzl4w4u92", AppCategory.IDE_CODE_EDITOR, "Cursor"),
+            ("Terminal", "com.apple.Terminal", AppCategory.TERMINAL, "Terminal"),
+            ("iTerm2", "com.googlecode.iterm2", AppCategory.TERMINAL, "iTerm2"),
+            ("Warp", "dev.warp.warp-stable", AppCategory.TERMINAL, "Warp"),
+            ("Slack", "com.tinyspeck.slackmacgap", AppCategory.SLACK_CHAT, "Slack"),
+            ("Microsoft Teams", "com.microsoft.teams", AppCategory.TEAMS_CHAT, "Teams"),
+            ("Microsoft Outlook", "com.microsoft.outlook", AppCategory.EMAIL, "Outlook"),
+            ("Notes", "com.apple.Notes", AppCategory.DOCUMENT_EDITOR, "Notes"),
+            ("Safari", "com.apple.Safari", AppCategory.BROWSER_GENERAL, "Safari"),
+            ("Google Chrome", "com.google.Chrome", AppCategory.BROWSER_GENERAL, "Chrome"),
+            ("Arc", "company.thebrowser.browser", AppCategory.BROWSER_GENERAL, "Arc"),
+        ]
+
+        for exe_name, bundle_id, expected_cat, expected_name_sub in test_cases:
+            cat, name, sensitive = classify_application(
+                exe_name=exe_name,
+                window_title="Sample Document",
+                app_hint=bundle_id,
+            )
+            self.assertEqual(cat, expected_cat, f"Mismatch category for {exe_name} / {bundle_id}")
+            self.assertIn(expected_name_sub, name, f"Mismatch name for {exe_name} / {bundle_id}")
+            self.assertFalse(sensitive, f"Unexpected sensitivity for {exe_name} / {bundle_id}")
+
+    def test_vs_code_integrated_terminal_classification(self):
+        from context_snapshot import AppCategory, classify_application
+
+        cat, name, sensitive = classify_application(
+            exe_name="Code",
+            window_title="bash - Terminal 1",
+            app_hint="com.microsoft.VSCode",
+        )
+        self.assertEqual(cat, AppCategory.TERMINAL)
+        self.assertIn("Terminal", name)
+        self.assertFalse(sensitive)
+
+    def test_macos_sensitive_app_deny_list(self):
+        from context_snapshot import classify_application, is_sensitive_window
+
+        sensitive_cases = [
+            ("1Password", "com.1password.1password"),
+            ("Bitwarden", "com.bitwarden.desktop"),
+            ("Dashlane", "com.dashlane.dashlane"),
+            ("Keychain Access", "com.apple.keychainaccess"),
+            ("SecurityAgent", "com.apple.securityagent"),
+            ("loginwindow", "com.apple.loginwindow"),
+            ("coreauthd", "com.apple.coreauthd"),
+            ("pinentry-mac", "org.gpgtools.pinentry-mac"),
+            ("KeePassXC", "org.keepassxc.keepassxc"),
+        ]
+
+        for exe_name, bundle_id in sensitive_cases:
+            self.assertTrue(
+                is_sensitive_window(exe_name=exe_name, app_hint=bundle_id),
+                f"Expected sensitive window for {exe_name} / {bundle_id}",
+            )
+            _, _, sensitive = classify_application(exe_name=exe_name, app_hint=bundle_id)
+            self.assertTrue(
+                sensitive,
+                f"Expected classify_application sensitive=True for {exe_name} / {bundle_id}",
+            )
+
+    def test_secure_input_refusal_in_injector(self):
+        from text_injector import TextInjector
+
+        injector = TextInjector()
+        with patch("platform_compat.is_secure_input_enabled", return_value=True):
+            res = injector.inject("secret text", target_hwnd=(1234, 5678))
+            self.assertFalse(res.success)
+            self.assertEqual(res.method, "refused_secure_input")
+            self.assertIn("Secure Input", res.error)
+
+    def test_macos_window_token_comparison_and_restoration(self):
+        mac_backend = MacOSBackend()
+        token = (9999, 101)  # (pid, window_id)
+
+        mock_front = MagicMock()
+        mock_front.processIdentifier.return_value = 9999
+
+        mock_appkit = MagicMock()
+        mock_appkit.NSWorkspace.sharedWorkspace.return_value.frontmostApplication.return_value = mock_front
+
+        with patch("sys.platform", "darwin"), \
+             patch("platform_compat.is_secure_input_enabled", return_value=False), \
+             patch.dict("sys.modules", {"AppKit": mock_appkit}):
+            verified = mac_backend.verify_and_restore_target_window(token)
+            self.assertTrue(verified)
+
+        # When frontmost app PID differs, tries reactivation
+        mock_diff_front = MagicMock()
+        mock_diff_front.processIdentifier.return_value = 1111
+
+        mock_running_app = MagicMock()
+        mock_appkit_reactivate = MagicMock()
+        mock_appkit_reactivate.NSWorkspace.sharedWorkspace.return_value.frontmostApplication.side_effect = [mock_diff_front, mock_front]
+        mock_appkit_reactivate.NSRunningApplication.runningApplicationWithProcessIdentifier_.return_value = mock_running_app
+
+        with patch("sys.platform", "darwin"), \
+             patch("platform_compat.is_secure_input_enabled", return_value=False), \
+             patch.dict("sys.modules", {"AppKit": mock_appkit_reactivate}):
+            restored = mac_backend.verify_and_restore_target_window(token)
+            self.assertTrue(restored)
+            mock_running_app.activateWithOptions_.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

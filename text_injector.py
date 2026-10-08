@@ -16,16 +16,20 @@ Features:
 
 from __future__ import annotations
 
-import ctypes
-import ctypes.wintypes
+import sys
+if sys.platform == "win32":
+    try:
+        import ctypes
+        import ctypes.wintypes
+    except Exception:
+        pass
 import json
 import logging
 import os
-import sys
 import threading
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 try:
     import keyboard
@@ -125,63 +129,16 @@ class TextInjector:
         return all(32 <= ord(c) <= 126 for c in text)
 
     @staticmethod
-    def verify_and_restore_target_window(target_hwnd: int) -> bool:
+    def verify_and_restore_target_window(target_hwnd: Any) -> bool:
         """
         Verify that the current foreground window matches target_hwnd.
         If it does not, attempt to restore and focus target_hwnd.
         Returns True if the target window is verified and focused.
         """
-        if sys.platform != "win32" or not target_hwnd:
+        if not target_hwnd:
             return True
-
-        user32 = ctypes.windll.user32
-
-        # Verify window is still valid
-        if not user32.IsWindow(target_hwnd):
-            logging.warning(f"[Injector] Target HWND {target_hwnd} is no longer a valid window.")
-            return False
-
-        curr_hwnd = user32.GetForegroundWindow()
-        if curr_hwnd == target_hwnd:
-            return True
-
-        logging.info(
-            f"[Injector] Foreground window changed ({curr_hwnd} != target {target_hwnd}). "
-            "Attempting to restore target window..."
-        )
-
-        # Attach thread inputs if needed to allow foreground change
-        kernel32 = ctypes.windll.kernel32
-        curr_thread = kernel32.GetCurrentThreadId()
-        target_thread = user32.GetWindowThreadProcessId(target_hwnd, None)
-
-        attached = False
-        if curr_thread != target_thread:
-            attached = bool(user32.AttachThreadInput(curr_thread, target_thread, True))
-
-        try:
-            # If minimized, restore it
-            SW_RESTORE = 9
-            if user32.IsIconic(target_hwnd):
-                user32.ShowWindow(target_hwnd, SW_RESTORE)
-
-            user32.SetForegroundWindow(target_hwnd)
-            time.sleep(0.06)
-
-            # Re-check
-            confirmed_hwnd = user32.GetForegroundWindow()
-            if confirmed_hwnd == target_hwnd:
-                logging.info(f"[Injector] Successfully restored target HWND {target_hwnd}.")
-                return True
-            else:
-                logging.warning(
-                    f"[Injector] Target window restoration failed. "
-                    f"Foreground is {confirmed_hwnd}, expected {target_hwnd}."
-                )
-                return False
-        finally:
-            if attached:
-                user32.AttachThreadInput(curr_thread, target_thread, False)
+        import platform_compat
+        return platform_compat.verify_and_restore_target_window(target_hwnd)
 
     def _inject_via_clipboard(self, text: str) -> InjectionResult:
         """Inject text via Windows clipboard + Ctrl+V, then restore original clipboard."""
@@ -237,13 +194,13 @@ class TextInjector:
 
             threading.Thread(target=_restore, daemon=True).start()
 
-    def inject(self, text: str, target_hwnd: int | None = None) -> InjectionResult:
+    def inject(self, text: str, target_hwnd: Any = None) -> InjectionResult:
         """
         Inject text into the target active window.
 
         Args:
             text: Text to type or paste.
-            target_hwnd: Optional target HWND. If provided, target is verified/restored.
+            target_hwnd: Optional target HWND / window token. If provided, target is verified/restored.
                          Injection aborts if target window cannot be verified.
 
         Returns:
@@ -255,6 +212,17 @@ class TextInjector:
         cleaned = text.strip().replace("\r\n", "\n")
         if not cleaned:
             return InjectionResult(success=True, method="empty", injected_text="")
+
+        # Secure input check (e.g. macOS password fields)
+        import platform_compat
+        if platform_compat.is_secure_input_enabled():
+            err = "Secure Input is active (password field detected). Injection refused."
+            logging.warning(f"[Injector] {err}")
+            return InjectionResult(
+                success=False,
+                method="refused_secure_input",
+                error=err,
+            )
 
         # Small pause before typing to let the user's key-release register
         time.sleep(0.12)
@@ -289,7 +257,7 @@ class TextInjector:
             # Unicode, multiline, or keyboard unsupported: use clipboard injection directly
             return self._inject_via_clipboard(cleaned)
 
-    def inject_with_newline(self, text: str, target_hwnd: int | None = None) -> InjectionResult:
+    def inject_with_newline(self, text: str, target_hwnd: Any = None) -> InjectionResult:
         """Type or paste the text followed by Enter."""
         res = self.inject(text, target_hwnd=target_hwnd)
         if res.success and text and text.strip() and HAS_KEYBOARD:

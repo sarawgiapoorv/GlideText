@@ -71,7 +71,7 @@ class InsertionRecord:
     """Record of text inserted by GlideText into a target window."""
     session_id: str
     text: str
-    target_hwnd: Optional[int]
+    target_hwnd: Optional[Any]
     timestamp: float
     char_count: int
     word_count: int
@@ -106,7 +106,7 @@ class InsertionHistory:
         self,
         session_id: str,
         text: str,
-        target_hwnd: Optional[int] = None,
+        target_hwnd: Optional[Any] = None,
     ) -> Optional[InsertionRecord]:
         """Add a successful GlideText injection to the insertion history."""
         if not text or not text.strip():
@@ -134,7 +134,7 @@ class InsertionHistory:
                 return None
             return self._history[-1]
 
-    def pop_last(self, target_hwnd: Optional[int] = None) -> Optional[InsertionRecord]:
+    def pop_last(self, target_hwnd: Optional[Any] = None) -> Optional[InsertionRecord]:
         """Remove and return the most recent insertion, optionally matching target_hwnd."""
         with self._lock:
             if not self._history:
@@ -235,7 +235,7 @@ class VoiceCommandExecutor:
     def execute_command(
         self,
         command: VoiceCommand,
-        target_hwnd: Optional[int] = None,
+        target_hwnd: Optional[Any] = None,
     ) -> VoiceCommandResult:
         """Execute a parsed VoiceCommand safely.
 

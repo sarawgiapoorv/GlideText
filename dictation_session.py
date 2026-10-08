@@ -157,7 +157,7 @@ class DictationSession:
         self,
         mode: SessionMode | str = SessionMode.PUSH_TO_TALK,
         context_info: Optional[dict] = None,
-        target_hwnd: Optional[int] = None,
+        target_hwnd: Optional[Any] = None,
         style: str = "Normal",
         session_id: Optional[str] = None,
         lookback_context: str = "",
@@ -171,7 +171,7 @@ class DictationSession:
 
         # Context & configuration captured strictly for this session (never leaked across sessions)
         self.context_info: dict = dict(context_info) if context_info else {}
-        self.target_hwnd: Optional[int] = (
+        self.target_hwnd: Optional[Any] = (
             target_hwnd if target_hwnd is not None else self.context_info.get("hwnd")
         )
         if self.target_hwnd is not None:
