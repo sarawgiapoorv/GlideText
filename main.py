@@ -18,25 +18,39 @@ import time
 import re
 import importlib.util
 import traceback
+import platform_compat
 
 # We don't import gui_app or any other third-party dependencies at the top level
 # to prevent import crashes during pre-flight checks.
 
-REQUIRED_LIBS = [
+_COMMON_REQUIRED = [
     ("customtkinter", "customtkinter"),
     ("sounddevice", "sounddevice"),
     ("keyring", "keyring"),
     ("faster_whisper", "faster-whisper"),
     ("wavio", "wavio"),
-    ("pycaw", "pycaw"),
-    ("comtypes", "comtypes"),
     ("pyperclip", "pyperclip"),
-    ("keyboard", "keyboard"),
     ("numpy", "numpy"),
     ("requests", "requests"),
     ("pystray", "pystray"),
     ("PIL", "Pillow"),
 ]
+
+if sys.platform == "win32":
+    REQUIRED_LIBS = _COMMON_REQUIRED + [
+        ("pycaw", "pycaw"),
+        ("comtypes", "comtypes"),
+        ("keyboard", "keyboard"),
+    ]
+elif sys.platform == "darwin":
+    REQUIRED_LIBS = _COMMON_REQUIRED + [
+        ("pynput", "pynput"),
+        ("objc", "pyobjc-core"),
+        ("Quartz", "pyobjc-framework-Quartz"),
+        ("AppKit", "pyobjc-framework-Cocoa"),
+    ]
+else:
+    REQUIRED_LIBS = list(_COMMON_REQUIRED)
 
 OPTIONAL_LIBS = [
     ("noisereduce", "noisereduce"),
@@ -45,16 +59,11 @@ OPTIONAL_LIBS = [
 
 
 def get_app_dir() -> str:
-    base = os.getenv("LOCALAPPDATA", os.path.join(os.path.expanduser("~"), "AppData", "Local"))
-    app_dir = os.path.join(base, "GlideText")
-    os.makedirs(app_dir, exist_ok=True)
-    return app_dir
+    return platform_compat.get_app_data_dir()
 
 
 def get_logs_dir() -> str:
-    logs_dir = os.path.join(get_app_dir(), "logs")
-    os.makedirs(logs_dir, exist_ok=True)
-    return logs_dir
+    return platform_compat.get_logs_dir()
 
 
 def log_setup(msg: str):
@@ -204,13 +213,14 @@ def show_splash_screen(missing_required):
     frame = tk.Frame(root, bg=bg_color, bd=1, relief="solid", highlightbackground=border_color, highlightthickness=1)
     frame.pack(fill="both", expand=True)
     
-    title_label = tk.Label(frame, text="GlideText", bg=bg_color, fg=accent_color, font=("Segoe UI", 26, "bold"))
+    font_family = platform_compat.get_font_family()
+    title_label = tk.Label(frame, text="GlideText", bg=bg_color, fg=accent_color, font=(font_family, 26, "bold"))
     title_label.pack(pady=(35, 10))
     
-    sub_label = tk.Label(frame, text="Privacy-First Voice Dictation Engine", bg=bg_color, fg=sec_color, font=("Segoe UI", 10, "italic"))
+    sub_label = tk.Label(frame, text="Privacy-First Voice Dictation Engine", bg=bg_color, fg=sec_color, font=(font_family, 10, "italic"))
     sub_label.pack(pady=(0, 20))
     
-    status_label = tk.Label(frame, text="Checking environment status...", bg=bg_color, fg=text_color, font=("Segoe UI", 11))
+    status_label = tk.Label(frame, text="Checking environment status...", bg=bg_color, fg=text_color, font=(font_family, 11))
     status_label.pack(pady=10)
     
     progress_bg = tk.Frame(frame, bg="#1e293b", height=4, width=320)

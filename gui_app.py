@@ -19,17 +19,22 @@ import customtkinter as ctk
 import threading
 import os
 import time
-import keyboard
+try:
+    import keyboard
+    HAS_KEYBOARD = True
+except Exception:
+    keyboard = None
+    HAS_KEYBOARD = False
 from datetime import datetime
 import random
 import queue
 import sys
 import logging
 from logging.handlers import RotatingFileHandler
+import platform_compat
 
 # Setup persistent rotating file logging
-_log_dir = os.path.join(os.getenv("LOCALAPPDATA", os.path.expanduser("~")), "GlideText", "logs")
-os.makedirs(_log_dir, exist_ok=True)
+_log_dir = platform_compat.get_logs_dir()
 _log_file = os.path.join(_log_dir, "glidetext.log")
 
 _logger = logging.getLogger()
@@ -47,24 +52,8 @@ if not _logger.handlers:
         _logger.addHandler(_stream_handler)
 
 def set_thread_priority(priority_level: int):
-    """Set the calling thread's priority on Windows.
-    
-    priority_level:
-        2  = THREAD_PRIORITY_HIGHEST
-        1  = THREAD_PRIORITY_ABOVE_NORMAL
-        0  = THREAD_PRIORITY_NORMAL
-        -1 = THREAD_PRIORITY_BELOW_NORMAL
-        -2 = THREAD_PRIORITY_LOWEST
-    """
-    import sys
-    if sys.platform == "win32":
-        try:
-            import ctypes
-            kernel32 = ctypes.windll.kernel32
-            h_thread = kernel32.GetCurrentThread()
-            kernel32.SetThreadPriority(h_thread, priority_level)
-        except Exception as e:
-            logging.error(f"[Priority] Failed to set thread priority to {priority_level}: {e}")
+    """Set the calling thread's priority if supported by OS."""
+    platform_compat.set_thread_priority(priority_level)
 
 try:
     import pystray
@@ -273,8 +262,8 @@ class C:
     TRANSPARENT   = "transparent"
 
 
-FONT = "Segoe UI"
-FONT_CURSIVE = "Segoe Script"
+FONT = platform_compat.get_font_family()
+FONT_CURSIVE = "Segoe Script" if platform_compat.IS_WINDOWS else "Apple Chancery"
 FONT_SERIF = "Georgia"
 
 

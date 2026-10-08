@@ -1,4 +1,17 @@
-keyboard>=0.13.5
+# Windows-only dependencies
+keyboard>=0.13.5; sys_platform == 'win32'
+pycaw>=2023.4.7; sys_platform == 'win32'
+comtypes>=1.2.0; sys_platform == 'win32'
+
+# macOS-only dependencies
+pynput>=1.7.6; sys_platform == 'darwin'
+pyobjc-core>=10.0; sys_platform == 'darwin'
+pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'
+pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'
+pyobjc-framework-ApplicationServices>=10.0; sys_platform == 'darwin'
+pyobjc-framework-AVFoundation>=10.0; sys_platform == 'darwin'
+
+# Cross-platform common dependencies
 sounddevice>=0.4.6
 numpy>=1.24,<3.0
 scipy>=1.10,<2.0
@@ -7,10 +20,8 @@ requests>=2.31
 customtkinter>=5.2
 pystray>=0.19
 Pillow>=10.0
-pycaw>=2023.4.7
-comtypes>=1.2.0
 pyperclip>=1.8.2
 keyring>=24.2.0
 faster-whisper>=1.0.0
 noisereduce>=3.0.0
-# webrtcvad>=2.0.10  # Optional: Voice Activity Detection (requires C++ build tools on Windows)
+# webrtcvad>=2.0.10  # Optional: Voice Activity Detection (requires C++ build tools on Windows / Xcode CLT on macOS)
