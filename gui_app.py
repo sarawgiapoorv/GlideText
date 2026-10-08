@@ -15,16 +15,26 @@ Rebuilt from scratch with:
   - All print/UI strings use ASCII-safe characters (Windows cp1252 safe)
 """
 
+import sys
 import customtkinter as ctk
 import threading
 import os
 import time
-try:
-    import keyboard
-    HAS_KEYBOARD = True
-except Exception:
-    keyboard = None
-    HAS_KEYBOARD = False
+if sys.platform == "win32":
+    try:
+        import keyboard
+        HAS_KEYBOARD = True
+    except Exception:
+        keyboard = None
+        HAS_KEYBOARD = False
+else:
+    try:
+        from platform_compat.input_backend import get_input_backend
+        keyboard = get_input_backend()
+        HAS_KEYBOARD = True
+    except Exception:
+        keyboard = None
+        HAS_KEYBOARD = False
 from datetime import datetime
 import random
 import queue
@@ -96,12 +106,15 @@ def _read_config() -> dict:
     config_path = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "config.txt"
     )
+    default_ptt = "right alt" if sys.platform == "win32" else "right option"
     result = {
         "api_key": "",
         "device_index": None,
         "whisper_model": "base",
         "whisper_language": "auto",
         "freellmapi_dir": "",
+        "hotkey_ptt": default_ptt,
+        "hotkey_continuous": "ctrl + shift + a",
     }
 
     # 1. Retrieve API key securely via keyring
@@ -153,6 +166,10 @@ def _read_config() -> dict:
                         result["freellmapi_dir"] = v
                     elif k_upper == "GEMINI_API_KEY" and not result["api_key"]:
                         result["api_key"] = v
+                    elif k_upper == "HOTKEY_PTT" and v:
+                        result["hotkey_ptt"] = v
+                    elif k_upper == "HOTKEY_CONTINUOUS" and v:
+                        result["hotkey_continuous"] = v
         except Exception as e:
             logging.error(f"[Config] Failed to read config.txt: {e}")
     else:
@@ -1077,13 +1094,12 @@ class GlideTextApp(ctk.CTk):
 
             if app_category == AppCategory.TERMINAL or any(
                 term in app_hint.lower() or term in exe_name.lower()
-                for term in ["terminal", "cmd", "powershell", "bash", "wsl"]
+                for term in ["terminal", "cmd", "powershell", "bash", "wsl", "iterm", "warp", "kitty", "alacritty", "console"]
             ):
                 logging.info("[Lookback] Terminal active -- skipping lookback context capture.")
                 return ""
 
         import pyperclip
-        import keyboard
         import time
 
         try:
@@ -1092,23 +1108,25 @@ class GlideTextApp(ctk.CTk):
             clipboard_backup = ""
 
         pre_text = ""
+        word_mod = platform_compat.get_word_modifier()
+        copy_combo = platform_compat.get_action_combo(platform_compat.LogicalAction.COPY)
         try:
             # Clear clipboard to detect if copy succeeded
             pyperclip.copy("")
             time.sleep(0.01)
 
-            # Hold ctrl+shift down, tap left 6 times, release
-            keyboard.press("ctrl")
+            # Hold word_mod+shift down, tap left 6 times, release
+            keyboard.press(word_mod)
             keyboard.press("shift")
             for _ in range(6):
                 keyboard.press_and_release("left")
                 time.sleep(0.005)
             keyboard.release("shift")
-            keyboard.release("ctrl")
+            keyboard.release(word_mod)
             time.sleep(0.02)
 
             # Copy selection
-            keyboard.press_and_release("ctrl+c")
+            keyboard.press_and_release(copy_combo)
             time.sleep(0.05)
 
             # Read selection
@@ -1122,7 +1140,7 @@ class GlideTextApp(ctk.CTk):
             logging.info(f"[Lookback] Error capturing lookback context: {e}")
             try:
                 keyboard.release("shift")
-                keyboard.release("ctrl")
+                keyboard.release(word_mod)
             except Exception:
                 pass
         finally:
@@ -1174,7 +1192,6 @@ class GlideTextApp(ctk.CTk):
             return True
 
         import pyperclip
-        import keyboard
         import time
 
         try:
@@ -1184,6 +1201,7 @@ class GlideTextApp(ctk.CTk):
 
         import uuid
         sentinel = str(uuid.uuid4())
+        copy_combo = platform_compat.get_action_combo(platform_compat.LogicalAction.COPY)
 
         time.sleep(0.05)
         try:
@@ -1191,7 +1209,7 @@ class GlideTextApp(ctk.CTk):
             max_budget = min(1.5, 0.150 + 0.004 * len(old_suffix))
             max_polls = max(5, int(max_budget / 0.02))
 
-            # 2. Scale settle delay before Ctrl+C
+            # 2. Scale settle delay before copy
             settle_delay = min(0.5, 0.05 + 0.002 * len(old_suffix))
 
             for attempt in range(1, 3):
@@ -1208,7 +1226,7 @@ class GlideTextApp(ctk.CTk):
                 time.sleep(settle_delay)
 
                 # Copy selection to clipboard
-                keyboard.press_and_release("ctrl+c")
+                keyboard.press_and_release(copy_combo)
                 
                 # Poll for clipboard update
                 selected = sentinel
@@ -1521,16 +1539,20 @@ class GlideTextApp(ctk.CTk):
 
         # Stage 3 -- Register hotkeys
         try:
+            default_ptt = "right alt" if sys.platform == "win32" else "right option"
+            ptt_key = getattr(self, "config", {}).get("hotkey_ptt") or default_ptt
+            continuous_combo = getattr(self, "config", {}).get("hotkey_continuous") or "ctrl + shift + a"
+
             keyboard.on_press_key(
-                "right alt", self._on_key_press, suppress=False,
+                ptt_key, self._on_key_press, suppress=False,
             )
             keyboard.on_release_key(
-                "right alt", self._on_key_release, suppress=False,
+                ptt_key, self._on_key_release, suppress=False,
             )
             keyboard.add_hotkey(
-                "ctrl + shift + a", self._toggle_continuous_recording,
+                continuous_combo, self._toggle_continuous_recording,
             )
-            logging.info("[GUI] Hotkeys registered: Right Alt (push-to-talk), Ctrl+Shift+A (continuous)")
+            logging.info(f"[GUI] Hotkeys registered: {ptt_key} (push-to-talk), {continuous_combo} (continuous)")
         except Exception as e:
             logging.info(f"[GUI] Hotkey registration failed: {e}")
             self._set_status("error", f"Hotkey setup failed: {e}")
@@ -1845,14 +1867,16 @@ class GlideTextApp(ctk.CTk):
         import time
 
         if command == "delete_last_sentence":
-            # Issue a standard Ctrl+Z undo sequence
-            keyboard.press_and_release("ctrl+z")
+            # Issue a standard Undo sequence (Ctrl+Z on Windows, Cmd+Z on macOS)
+            undo_combo = platform_compat.get_action_combo(platform_compat.LogicalAction.UNDO)
+            keyboard.press_and_release(undo_combo)
             self._last_injected_text = ""
-            logging.info("[GUI] Executed: undo (ctrl+z)")
+            logging.info(f"[GUI] Executed: undo ({undo_combo})")
 
         elif command == "delete_all":
-            # Select all and delete (Ctrl+A, Delete)
-            keyboard.press_and_release("ctrl+a")
+            # Select all and delete (Ctrl+A on Windows, Cmd+A on macOS, Delete)
+            select_all_combo = platform_compat.get_action_combo(platform_compat.LogicalAction.SELECT_ALL)
+            keyboard.press_and_release(select_all_combo)
             time.sleep(0.05)
             keyboard.press_and_release("delete")
             self._last_injected_text = ""
@@ -2097,7 +2121,7 @@ class GlideTextApp(ctk.CTk):
             # ensure no unprompted newlines are injected that could accidentally execute shell commands.
             app_hint = context.get("app_hint", "") if context else ""
             if snapshot.single_line_output or any(
-                term in app_hint.lower() for term in ["terminal", "cmd", "powershell", "bash", "wsl"]
+                term in app_hint.lower() for term in ["terminal", "cmd", "powershell", "bash", "wsl", "iterm", "warp", "kitty", "alacritty", "console"]
             ):
                 normalized_polished = normalized_polished.replace("\n", " ").strip()
 

@@ -23,11 +23,19 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
-try:
-    import keyboard
-    HAS_KEYBOARD = True
-except ImportError:
-    HAS_KEYBOARD = False
+if sys.platform == "win32":
+    try:
+        import keyboard
+        HAS_KEYBOARD = True
+    except ImportError:
+        HAS_KEYBOARD = False
+else:
+    try:
+        from platform_compat.input_backend import get_input_backend
+        keyboard = get_input_backend()
+        HAS_KEYBOARD = True
+    except Exception:
+        HAS_KEYBOARD = False
 
 try:
     import pyperclip

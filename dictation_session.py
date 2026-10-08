@@ -1190,7 +1190,7 @@ class DictationSessionCoordinator:
             app_hint = context.get("app_hint", "") if context else ""
             if snapshot.single_line_output or any(
                 term in app_hint.lower()
-                for term in ["terminal", "cmd", "powershell", "bash", "wsl"]
+                for term in ["terminal", "cmd", "powershell", "bash", "wsl", "iterm", "warp", "kitty", "alacritty", "console"]
             ):
                 normalized_polished = normalized_polished.replace("\n", " ").strip()
 

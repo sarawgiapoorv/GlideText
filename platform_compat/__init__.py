@@ -114,3 +114,17 @@ def check_accessibility_permission(prompt: bool = False) -> Tuple[bool, str]:
 
 def check_input_monitoring_permission(prompt: bool = False) -> Tuple[bool, str]:
     return get_platform_backend().check_input_monitoring_permission(prompt=prompt)
+
+
+# Input backend re-exports
+from platform_compat.input_backend import (
+    BaseInputBackend,
+    WindowsInputBackend,
+    MacOSInputBackend,
+    FallbackInputBackend,
+    LogicalAction,
+    get_input_backend,
+    set_input_backend,
+    get_action_combo,
+    get_word_modifier,
+)

@@ -216,6 +216,107 @@ class TestPlatformCompat(unittest.TestCase):
             self.assertTrue(restored)
             mock_running_app.activateWithOptions_.assert_called_once()
 
+    def test_logical_action_combos_translation(self):
+        """Logical editing actions must translate to Ctrl on Windows and Cmd/Option on macOS."""
+        from platform_compat.input_backend import (
+            LogicalAction,
+            get_action_combo,
+            get_word_modifier,
+        )
+
+        with patch("sys.platform", "win32"):
+            self.assertEqual(get_action_combo(LogicalAction.COPY), "ctrl+c")
+            self.assertEqual(get_action_combo(LogicalAction.PASTE), "ctrl+v")
+            self.assertEqual(get_action_combo(LogicalAction.UNDO), "ctrl+z")
+            self.assertEqual(get_action_combo(LogicalAction.SELECT_ALL), "ctrl+a")
+            self.assertEqual(get_action_combo(LogicalAction.SELECT_WORD_LEFT), "ctrl+shift+left")
+            self.assertEqual(get_word_modifier(), "ctrl")
+
+        with patch("sys.platform", "darwin"):
+            self.assertEqual(get_action_combo(LogicalAction.COPY), "cmd+c")
+            self.assertEqual(get_action_combo(LogicalAction.PASTE), "cmd+v")
+            self.assertEqual(get_action_combo(LogicalAction.UNDO), "cmd+z")
+            self.assertEqual(get_action_combo(LogicalAction.SELECT_ALL), "cmd+a")
+            self.assertEqual(get_action_combo(LogicalAction.SELECT_WORD_LEFT), "option+shift+left")
+            self.assertEqual(get_word_modifier(), "option")
+
+    def test_macos_input_backend_synthetic_keystroke(self):
+        """MacOSInputBackend must generate Quartz CGEvents with correct keycode and flag mask."""
+        from platform_compat.input_backend import MacOSInputBackend
+
+        mock_quartz = MagicMock()
+        mock_event = MagicMock()
+        mock_quartz.CGEventCreateKeyboardEvent.return_value = mock_event
+
+        backend = MacOSInputBackend()
+        with patch.dict("sys.modules", {"Quartz": mock_quartz}):
+            # Press and release Cmd+V (keycode for 'v' is 9, cmd flag is 0x00100000)
+            backend.press_and_release("cmd+v")
+            self.assertTrue(mock_quartz.CGEventCreateKeyboardEvent.called)
+            mock_quartz.CGEventSetFlags.assert_called()
+            mock_quartz.CGEventPost.assert_called()
+
+    def test_macos_input_backend_write_unicode(self):
+        """MacOSInputBackend.write must use CGEventKeyboardSetUnicodeString for layout independence."""
+        from platform_compat.input_backend import MacOSInputBackend
+
+        mock_quartz = MagicMock()
+        mock_event = MagicMock()
+        mock_quartz.CGEventCreateKeyboardEvent.return_value = mock_event
+
+        backend = MacOSInputBackend()
+        with patch.dict("sys.modules", {"Quartz": mock_quartz}):
+            backend.write("Hi", delay=0)
+            self.assertEqual(mock_quartz.CGEventKeyboardSetUnicodeString.call_count, 2)
+
+    def test_macos_input_backend_pynput_listener_dispatch(self):
+        """MacOSInputBackend must dispatch push-to-talk holds and multi-key combos."""
+        from platform_compat.input_backend import MacOSInputBackend
+
+        backend = MacOSInputBackend()
+
+        press_called = []
+        release_called = []
+        hotkey_called = []
+
+        backend.on_press_key("right option", lambda ev: press_called.append(True))
+        backend.on_release_key("right option", lambda ev: release_called.append(True))
+        backend.add_hotkey("ctrl+shift+a", lambda: hotkey_called.append(True))
+
+        mock_alt_r = MagicMock()
+        mock_alt_r.name = "alt_r"
+        del mock_alt_r.char
+
+        mock_ctrl = MagicMock()
+        mock_ctrl.name = "ctrl_l"
+        del mock_ctrl.char
+
+        mock_shift = MagicMock()
+        mock_shift.name = "shift_l"
+        del mock_shift.char
+
+        mock_a = MagicMock()
+        mock_a.char = "a"
+        mock_a.name = None
+
+        # Simulate Right Option press & release
+        backend._on_pynput_press(mock_alt_r)
+        self.assertEqual(len(press_called), 1)
+
+        backend._on_pynput_release(mock_alt_r)
+        self.assertEqual(len(release_called), 1)
+
+        # Simulate Ctrl+Shift+A combo
+        backend._on_pynput_press(mock_ctrl)
+        backend._on_pynput_press(mock_shift)
+        self.assertEqual(len(hotkey_called), 0)
+
+        backend._on_pynput_press(mock_a)
+        self.assertEqual(len(hotkey_called), 1)
+
+        backend.unhook_all()
+        self.assertEqual(len(backend._press_callbacks), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -31,11 +31,21 @@ import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
-try:
-    import keyboard
-    HAS_KEYBOARD = True
-except ImportError:
-    HAS_KEYBOARD = False
+from platform_compat.input_backend import LogicalAction, get_action_combo
+
+if sys.platform == "win32":
+    try:
+        import keyboard
+        HAS_KEYBOARD = True
+    except ImportError:
+        HAS_KEYBOARD = False
+else:
+    try:
+        from platform_compat.input_backend import get_input_backend
+        keyboard = get_input_backend()
+        HAS_KEYBOARD = True
+    except Exception:
+        HAS_KEYBOARD = False
 
 try:
     import pyperclip
@@ -167,8 +177,9 @@ class TextInjector:
             pyperclip.copy(text)
             time.sleep(0.03)
 
-            # 3. Trigger Ctrl+V
-            keyboard.press_and_release("ctrl+v")
+            # 3. Trigger Paste (Ctrl+V on Windows, Cmd+V on macOS)
+            paste_combo = get_action_combo(LogicalAction.PASTE)
+            keyboard.press_and_release(paste_combo)
             time.sleep(0.08)
 
             return InjectionResult(
