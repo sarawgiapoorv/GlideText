@@ -1,0 +1,47 @@
+name: CI Cross-Platform Tests
+
+on:
+  push:
+    branches: ["*"]
+  pull_request:
+    branches: ["*"]
+
+jobs:
+  test:
+    name: Test on ${{ matrix.os }} (Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+        python-version: ["3.10", "3.11"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Upgrade pip and build tools
+        run: |
+          python -m pip install --upgrade pip wheel
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements.txt
+
+      - name: Syntax and Bytecode Compilation (compileall)
+        run: |
+          python -m compileall -q .
+
+      - name: Verify macOS Permissions Check Diagnostic
+        run: |
+          python -m platform_compat.permissions_check
+
+      - name: Run Unit Test Suite
+        run: |
+          python -m unittest discover tests
