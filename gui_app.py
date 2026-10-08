@@ -702,8 +702,9 @@ class GlideTextApp(ctk.CTk):
         ).pack(anchor="w", pady=(0, 14))
 
         # Auto-Boot Toggle (Windows Registry)
+        autoboot_label = "Start GlideText with macOS Login" if sys.platform == "darwin" else "Start GlideText with Windows Boot"
         self.autoboot_switch = ctk.CTkSwitch(
-            inner, text="Start GlideText with Windows Boot",
+            inner, text=autoboot_label,
             font=(FONT, 13, "bold"), text_color=C.TEXT,
             progress_color=C.GREEN, button_color="#ffffff",
             button_hover_color="#e2e8f0", command=self._on_autoboot_toggle
@@ -711,6 +712,14 @@ class GlideTextApp(ctk.CTk):
         if self._check_autoboot_status():
             self.autoboot_switch.select()
         self.autoboot_switch.pack(fill="x", pady=(4, 16))
+
+        if sys.platform == "darwin":
+            ctk.CTkButton(
+                inner, text="Check macOS Permissions",
+                font=(FONT, 12, "bold"), fg_color="#334155",
+                hover_color="#475569", text_color="#f8fafc",
+                height=32, corner_radius=8, command=self._check_permissions_gui,
+            ).pack(fill="x", pady=(0, 14))
 
         # Apply button
         ctk.CTkButton(
@@ -1287,68 +1296,36 @@ class GlideTextApp(ctk.CTk):
         self.brain.set_style(choice)
 
 
-    def _check_autoboot_status(self) -> bool:
-        if not HAS_WINREG:
-            return False
-        try:
-            key = winreg.OpenKey(
-                winreg.HKEY_CURRENT_USER, 
-                r"Software\Microsoft\Windows\CurrentVersion\Run", 
-                0, 
-                winreg.KEY_READ
+    def _check_permissions_gui(self):
+        """Check macOS permissions and display status in Settings feedback."""
+        mic_ok, mic_msg = platform_compat.check_microphone_permission()
+        acc_ok, acc_msg = platform_compat.check_accessibility_permission(prompt=True)
+        inp_ok, inp_msg = platform_compat.check_input_monitoring_permission(prompt=True)
+        all_ok = mic_ok and acc_ok and inp_ok
+        if all_ok:
+            self.settings_feedback.configure(
+                text="All macOS permissions granted!",
+                text_color=C.GREEN,
             )
-            val = None
-            try:
-                val, _ = winreg.QueryValueEx(key, "GlideText")
-            except FileNotFoundError:
-                try:
-                    val, _ = winreg.QueryValueEx(key, "LocalFlow")
-                except FileNotFoundError:
-                    val = None
-            winreg.CloseKey(key)
-            return bool(val)
-        except Exception:
-            return False
+        else:
+            errs = []
+            if not mic_ok:
+                errs.append("Microphone")
+            if not acc_ok:
+                errs.append("Accessibility")
+            if not inp_ok:
+                errs.append("Input Monitoring")
+            self.settings_feedback.configure(
+                text=f"Permissions needed: {', '.join(errs)}. See System Settings.",
+                text_color=C.AMBER,
+            )
+
+    def _check_autoboot_status(self) -> bool:
+        return platform_compat.is_auto_boot_enabled()
 
     def _on_autoboot_toggle(self):
-        if not HAS_WINREG:
-            return
-        
         is_autoboot = self.autoboot_switch.get() == 1
-        exe = sys.executable
-        if exe.lower().endswith("python.exe"):
-            pythonw_exe = exe[:-10] + "pythonw.exe"
-        else:
-            pythonw_exe = exe
-        main_py_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "main.py"))
-        cmd_string = f'"{pythonw_exe}" "{main_py_path}" --silent'
-        
-        try:
-            key = winreg.OpenKey(
-                winreg.HKEY_CURRENT_USER, 
-                r"Software\Microsoft\Windows\CurrentVersion\Run", 
-                0, 
-                winreg.KEY_SET_VALUE
-            )
-            # Always clean up legacy LocalFlow registry key
-            try:
-                winreg.DeleteValue(key, "LocalFlow")
-            except FileNotFoundError:
-                pass
-
-            if is_autoboot:
-                winreg.SetValueEx(key, "GlideText", 0, winreg.REG_SZ, cmd_string)
-                logging.info(f"[Registry] Set GlideText autoboot: {cmd_string}")
-            else:
-                try:
-                    winreg.DeleteValue(key, "GlideText")
-                    logging.info("[Registry] Removed GlideText from boot.")
-                except FileNotFoundError:
-                    pass
-            winreg.CloseKey(key)
-        except Exception as e:
-            logging.error(f"[Registry] Failed to update autoboot status: {e}")
-            logging.error(f"[Registry] Failed to modify boot settings: {e}")
+        platform_compat.set_auto_boot(is_autoboot)
 
     def _apply_settings(self):
         # Device index
@@ -1536,6 +1513,22 @@ class GlideTextApp(ctk.CTk):
             self.after(0, self._setup_tray)
         except RuntimeError:
             pass
+
+        # macOS Permissions Check
+        if sys.platform == "darwin":
+            mic_ok, mic_msg = platform_compat.check_microphone_permission()
+            acc_ok, acc_msg = platform_compat.check_accessibility_permission(prompt=True)
+            inp_ok, inp_msg = platform_compat.check_input_monitoring_permission(prompt=True)
+            if not (mic_ok and acc_ok and inp_ok):
+                missing = []
+                if not mic_ok:
+                    missing.append("Microphone")
+                if not acc_ok:
+                    missing.append("Accessibility")
+                if not inp_ok:
+                    missing.append("Input Monitoring")
+                warn_msg = f"Permissions needed: {', '.join(missing)} (System Settings > Privacy & Security)"
+                logging.warning(f"[GUI] {warn_msg}")
 
         # Stage 3 -- Register hotkeys
         try:

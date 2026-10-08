@@ -317,6 +317,31 @@ class TestPlatformCompat(unittest.TestCase):
         backend.unhook_all()
         self.assertEqual(len(backend._press_callbacks), 0)
 
+    def test_permissions_check_diagnostics_tool(self):
+        """Test permissions diagnostic tool on non-macOS and mocked macOS."""
+        from platform_compat.permissions_check import run_diagnostics
+
+        # On Windows, diagnostics returns 0
+        with patch("sys.platform", "win32"):
+            res = run_diagnostics(prompt=False)
+            self.assertEqual(res, 0)
+
+        # On macOS with all granted
+        with patch("sys.platform", "darwin"), \
+             patch("platform_compat.check_microphone_permission", return_value=(True, "Granted")), \
+             patch("platform_compat.check_accessibility_permission", return_value=(True, "Granted")), \
+             patch("platform_compat.check_input_monitoring_permission", return_value=(True, "Granted")):
+            res = run_diagnostics(prompt=False)
+            self.assertEqual(res, 0)
+
+        # On macOS with missing permission
+        with patch("sys.platform", "darwin"), \
+             patch("platform_compat.check_microphone_permission", return_value=(True, "Granted")), \
+             patch("platform_compat.check_accessibility_permission", return_value=(False, "Missing")), \
+             patch("platform_compat.check_input_monitoring_permission", return_value=(True, "Granted")):
+            res = run_diagnostics(prompt=False)
+            self.assertEqual(res, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
