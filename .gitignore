@@ -6,8 +6,13 @@ config.txt
 *.env
 *.key
 *.pem
+*.p12
+*.pfx
+*.crt
+*.cert
 credentials/
 secrets/
+keyring*
 .encryption-key
 
 # Databases & local state
@@ -28,6 +33,26 @@ __pycache__/
 .vs/
 .vscode/
 .idea/
+*.swp
+*.swo
+
+# Node.js & local FreeLLMAPI copies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+freellmapi/
+FreeLLMAPI/
+freellm/
+
+# OS artifacts
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+desktop.ini
 
 # Audio artifacts & test recordings
 *.wav
@@ -42,6 +67,8 @@ ENV/
 
 # Logs & diagnostic markers
 *.log
+setup.log
 crash_report.txt
 deps_ok
+
 
