@@ -364,6 +364,29 @@ class TestPlatformCompat(unittest.TestCase):
             self.assertTrue(kwargs.get("start_new_session"))
             self.assertNotIn("creationflags", kwargs)
 
+    def test_freellm_manager_npm_search_and_shutdown_macos(self):
+        """freellm_manager on macOS must search Homebrew paths and killpg process group."""
+        import freellm_manager
+
+        target_bin = os.path.normpath("/opt/homebrew/bin/npm")
+        with patch("sys.platform", "darwin"), \
+             patch("shutil.which", return_value=None), \
+             patch("os.path.isfile", side_effect=lambda p: os.path.normpath(p) == target_bin), \
+             patch("os.access", return_value=True):
+            npm_path = freellm_manager._find_npm()
+            self.assertEqual(os.path.normpath(npm_path), target_bin)
+
+        mock_proc = MagicMock()
+        mock_proc.pid = 4321
+        with patch("sys.platform", "darwin"), \
+             patch.object(freellm_manager, "_process", mock_proc), \
+             patch("os.getpgid", return_value=4321, create=True), \
+             patch("os.killpg", create=True) as mock_killpg:
+            freellm_manager.shutdown()
+            mock_killpg.assert_called_once()
+            pgid, sig = mock_killpg.call_args[0]
+            self.assertEqual(pgid, 4321)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -209,6 +209,37 @@ def _find_npm() -> Optional[str]:
         found = shutil.which(name)
         if found:
             return found
+
+    if sys.platform == "darwin":
+        # Search common macOS paths where Node/npm is installed
+        mac_search_dirs = [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            os.path.expanduser("~/bin"),
+            os.path.expanduser("~/.local/bin"),
+        ]
+        # Check NVM, FNM, Volta Node versions
+        nvm_dir = os.path.expanduser("~/.nvm/versions/node")
+        if os.path.isdir(nvm_dir):
+            try:
+                for entry in sorted(os.listdir(nvm_dir), reverse=True):
+                    mac_search_dirs.append(os.path.join(nvm_dir, entry, "bin"))
+            except Exception:
+                pass
+        fnm_dir = os.path.expanduser("~/.local/share/fnm/current/bin")
+        if os.path.isdir(fnm_dir):
+            mac_search_dirs.append(fnm_dir)
+        volta_dir = os.path.expanduser("~/.volta/bin")
+        if os.path.isdir(volta_dir):
+            mac_search_dirs.append(volta_dir)
+
+        for d in mac_search_dirs:
+            p = os.path.join(d, "npm")
+            if os.path.isfile(p) and os.access(p, os.X_OK):
+                return p
+
     return None
 
 
@@ -247,10 +278,8 @@ def _spawn(freellm_dir: str, npm_path: str) -> Optional[subprocess.Popen]:
     if has_server_workspace:
         cmd = [npm_path, "run", "dev", "-w", "server"]
 
-    creation_flags = 0x08000000 if sys.platform == "win32" else 0
-    use_shell = sys.platform == "win32"
-
-    log_dir = os.path.join(os.getenv("LOCALAPPDATA", os.path.expanduser("~")), "GlideText", "logs")
+    import platform_compat
+    log_dir = platform_compat.get_logs_dir()
     os.makedirs(log_dir, exist_ok=True)
     log_file_path = os.path.join(log_dir, "freellmapi.log")
     try:
@@ -261,14 +290,24 @@ def _spawn(freellm_dir: str, npm_path: str) -> Optional[subprocess.Popen]:
 
     logging.info(f"[FreeLLM] Spawning: {' '.join(cmd)}  cwd={freellm_dir}")
     try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=freellm_dir,
-            creationflags=creation_flags,
-            stdout=log_file,
-            stderr=log_file,
-            shell=use_shell,
-        )
+        if sys.platform == "win32":
+            proc = subprocess.Popen(
+                cmd,
+                cwd=freellm_dir,
+                creationflags=0x08000000,
+                stdout=log_file,
+                stderr=log_file,
+                shell=True,
+            )
+        else:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=freellm_dir,
+                start_new_session=True,
+                stdout=log_file,
+                stderr=log_file,
+                shell=False,
+            )
         logging.info(f"[FreeLLM] Spawned PID {proc.pid}")
         return proc
 
@@ -455,11 +494,30 @@ def shutdown() -> None:
                 timeout=5,
             )
         else:
-            proc.terminate()
+            # On macOS / POSIX: terminate the entire process group cleanly
+            import signal
             try:
-                proc.wait(timeout=3.0)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+                if hasattr(os, "killpg") and hasattr(os, "getpgid"):
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                    try:
+                        proc.wait(timeout=2.0)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                else:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=2.0)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+            except ProcessLookupError:
+                pass
+            except Exception as e:
+                logging.warning(f"[FreeLLM] Error killing process group {proc.pid}: {e}")
+                proc.terminate()
+                try:
+                    proc.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
     except Exception as e:
         logging.warning(f"[FreeLLM] Error during shutdown: {e}")
     finally:
