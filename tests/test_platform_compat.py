@@ -387,6 +387,52 @@ class TestPlatformCompat(unittest.TestCase):
             pgid, sig = mock_killpg.call_args[0]
             self.assertEqual(pgid, 4321)
 
+    def test_dock_icon_policy_macos(self):
+        """platform_compat on macOS must set NSApplication activation policy for Dock icon."""
+        import platform_compat
+        from platform_compat.macos_backend import MacOSBackend
+
+        mock_appkit = MagicMock()
+        mock_app = MagicMock()
+        mock_appkit.NSApplication.sharedApplication.return_value = mock_app
+        mock_appkit.NSApplicationActivationPolicyAccessory = 1
+        mock_appkit.NSApplicationActivationPolicyRegular = 0
+
+        backend = MacOSBackend()
+        with patch("sys.platform", "darwin"), \
+             patch.dict("sys.modules", {"AppKit": mock_appkit}):
+            backend.hide_dock_icon()
+            mock_app.setActivationPolicy_.assert_called_with(1)
+
+            backend.show_dock_icon()
+            mock_app.setActivationPolicy_.assert_called_with(0)
+
+    def test_autoboot_status_and_toggle_macos(self):
+        """MacOSBackend must manage LaunchAgent plist without crashing."""
+        from platform_compat.macos_backend import MacOSBackend
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            backend = MacOSBackend()
+            test_plist = os.path.join(tmp_dir, "com.glidetext.app.plist")
+            backend._plist_path = test_plist
+
+            self.assertFalse(backend.is_auto_boot_enabled())
+
+            # Enable autoboot
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0)
+                enabled = backend.set_auto_boot(True)
+                self.assertTrue(enabled)
+                self.assertTrue(os.path.isfile(test_plist))
+                self.assertTrue(backend.is_auto_boot_enabled())
+
+                # Disable autoboot
+                disabled = backend.set_auto_boot(False)
+                self.assertTrue(disabled)
+                self.assertFalse(os.path.isfile(test_plist))
+                self.assertFalse(backend.is_auto_boot_enabled())
+
 
 if __name__ == "__main__":
     unittest.main()

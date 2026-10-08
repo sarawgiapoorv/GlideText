@@ -366,12 +366,20 @@ class GlideTextApp(ctk.CTk):
         # -- Window protocol --
         self.protocol("WM_DELETE_WINDOW", self._on_window_close)
 
+        # -- macOS standard window & app shortcuts --
+        if sys.platform == "darwin":
+            self.bind("<Command-w>", lambda e: self._on_window_close())
+            self.bind("<Command-q>", lambda e: self._quit_app())
+            self.bind("<Command-,>", lambda e: self._toggle_settings())
+
         # -- Bind hover event to trigger audio and vocabulary warmup --
         self.bind("<Enter>", self._on_hover_warmup)
 
         # -- Silent Mode execution --
         if start_silent:
             self.withdraw()
+            if sys.platform == "darwin":
+                platform_compat.hide_dock_icon()
 
         # -- Launch backend (background) --
         threading.Thread(
@@ -1434,10 +1442,19 @@ class GlideTextApp(ctk.CTk):
                 "GlideText", icon_img, "GlideText -- Ready", menu,
             )
             threading.Thread(
-                target=self._tray_icon.run, daemon=True,
+                target=self._tray_run_safe, daemon=True,
             ).start()
         except Exception as e:
-            logging.info(f"[GUI] Tray setup failed: {e}")
+            logging.info(f"[GUI] Tray setup failed (degrading gracefully): {e}")
+            self._tray_icon = None
+
+    def _tray_run_safe(self):
+        try:
+            if self._tray_icon:
+                self._tray_icon.run()
+        except Exception as e:
+            logging.warning(f"[GUI] Tray icon event loop error (degrading gracefully): {e}")
+            self._tray_icon = None
 
     @staticmethod
     def _make_tray_icon() -> "Image.Image":
@@ -1446,8 +1463,9 @@ class GlideTextApp(ctk.CTk):
         img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
         draw.ellipse([4, 4, size - 4, size - 4], fill="#18181b")
+        font_name = "Helvetica.ttc" if sys.platform == "darwin" else "segoeui.ttf"
         try:
-            font = ImageFont.truetype("segoeui.ttf", 22)
+            font = ImageFont.truetype(font_name, 22)
         except Exception:
             font = ImageFont.load_default()
         draw.text(
@@ -1457,6 +1475,8 @@ class GlideTextApp(ctk.CTk):
         return img
 
     def _tray_show(self, _icon=None, _item=None):
+        if sys.platform == "darwin":
+            platform_compat.show_dock_icon()
         self.after(0, self.deiconify)
         self.after(10, self.lift)
         self.after(20, self.focus_force)
@@ -1470,8 +1490,13 @@ class GlideTextApp(ctk.CTk):
         self.after(0, self._quit_app)
 
     def _on_window_close(self):
-        """X button -> minimise to tray (or quit if tray unavailable)."""
+        """X button -> minimise to tray / dock (or quit if tray unavailable)."""
         if HAS_TRAY and self._tray_icon:
+            self.withdraw()
+            if sys.platform == "darwin":
+                platform_compat.hide_dock_icon()
+        elif sys.platform == "darwin":
+            # On macOS, window close hides the window without quitting the background app
             self.withdraw()
         else:
             self._quit_app()
