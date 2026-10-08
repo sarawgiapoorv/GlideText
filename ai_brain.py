@@ -1287,7 +1287,11 @@ class AIBrain:
                     model_to_load = getattr(self, "whisper_model_name", "base")
                     logging.info(f"[AIBrain] Initializing faster-whisper model '{model_to_load}' (Singleton)...")
                     from faster_whisper import WhisperModel
-                    _WHISPER_MODEL_INSTANCE = WhisperModel(model_to_load, device="auto", compute_type="int8")
+                    try:
+                        _WHISPER_MODEL_INSTANCE = WhisperModel(model_to_load, device="auto", compute_type="int8")
+                    except Exception as e:
+                        logging.info(f"[AIBrain] Whisper int8 initialization failed ({e}); falling back to compute_type='default'...")
+                        _WHISPER_MODEL_INSTANCE = WhisperModel(model_to_load, device="auto", compute_type="default")
         return _WHISPER_MODEL_INSTANCE
 
     def _get_vocabulary_for_session(

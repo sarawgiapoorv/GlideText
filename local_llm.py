@@ -86,7 +86,7 @@ class LocalLLMEngine:
 
     @staticmethod
     def _find_ollama_executable() -> str | None:
-        """Find the ollama.exe binary path on Windows or POSIX."""
+        """Find the ollama binary path on Windows, macOS, or POSIX."""
         # 1. System PATH
         which_path = shutil.which("ollama")
         if which_path and os.path.isfile(which_path):
@@ -103,6 +103,19 @@ class LocalLLMEngine:
             pf_path = os.path.join(os.getenv("ProgramFiles", "C:\\Program Files"), "Ollama", "ollama.exe")
             if os.path.isfile(pf_path):
                 return pf_path
+
+        # 3. macOS standard paths (Homebrew, system, user bins, or Ollama.app)
+        elif sys.platform == "darwin":
+            mac_paths = [
+                "/opt/homebrew/bin/ollama",
+                "/usr/local/bin/ollama",
+                os.path.expanduser("~/bin/ollama"),
+                os.path.expanduser("~/.local/bin/ollama"),
+                "/Applications/Ollama.app/Contents/Resources/ollama",
+            ]
+            for p in mac_paths:
+                if os.path.isfile(p):
+                    return p
 
         return None
 
@@ -137,17 +150,22 @@ class LocalLLMEngine:
 
             logging.info(f"[LocalLLM] Ollama server not responding. Auto-starting headless: {binary} serve")
             try:
-                creation_flags = 0
                 if sys.platform == "win32":
                     # DETACHED_PROCESS = 0x00000008, CREATE_NO_WINDOW = 0x08000000
                     creation_flags = 0x08000000
-
-                self._server_process = subprocess.Popen(
-                    [binary, "serve"],
-                    creationflags=creation_flags,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
+                    self._server_process = subprocess.Popen(
+                        [binary, "serve"],
+                        creationflags=creation_flags,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                else:
+                    self._server_process = subprocess.Popen(
+                        [binary, "serve"],
+                        start_new_session=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
             except Exception as e:
                 logging.error(f"[LocalLLM] Failed to start Ollama background process: {e}")
                 return False

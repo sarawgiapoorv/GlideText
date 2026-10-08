@@ -342,6 +342,28 @@ class TestPlatformCompat(unittest.TestCase):
             res = run_diagnostics(prompt=False)
             self.assertEqual(res, 1)
 
+    def test_local_llm_ollama_paths_and_spawn_macos(self):
+        """LocalLLMEngine on macOS must discover Homebrew Ollama and spawn with start_new_session."""
+        from local_llm import LocalLLMEngine
+
+        with patch("sys.platform", "darwin"), \
+             patch("shutil.which", return_value=None), \
+             patch("os.path.isfile", side_effect=lambda p: p == "/opt/homebrew/bin/ollama"):
+            bin_path = LocalLLMEngine._find_ollama_executable()
+            self.assertEqual(bin_path, "/opt/homebrew/bin/ollama")
+
+        engine = LocalLLMEngine()
+        with patch("sys.platform", "darwin"), \
+             patch.object(engine, "is_server_running", side_effect=[False, False, True]), \
+             patch.object(engine, "_find_ollama_executable", return_value="/opt/homebrew/bin/ollama"), \
+             patch("local_llm.subprocess.Popen") as mock_popen:
+            success = engine.ensure_server_running(timeout_seconds=2.0)
+            self.assertTrue(success)
+            mock_popen.assert_called_once()
+            _, kwargs = mock_popen.call_args
+            self.assertTrue(kwargs.get("start_new_session"))
+            self.assertNotIn("creationflags", kwargs)
+
 
 if __name__ == "__main__":
     unittest.main()
