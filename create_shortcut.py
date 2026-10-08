@@ -1,5 +1,11 @@
 import os
+import sys
 import subprocess
+
+if sys.platform != "win32":
+    print("[GlideText] Desktop .lnk shortcuts are only applicable to Windows. On macOS, use Launch_GlideText.command.")
+    sys.exit(0)
+
 
 project_dir = os.path.dirname(os.path.abspath(__file__))
 bat_path = os.path.join(project_dir, "Launch_GlideText.bat")

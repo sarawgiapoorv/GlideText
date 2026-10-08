@@ -433,6 +433,18 @@ class TestPlatformCompat(unittest.TestCase):
                 self.assertFalse(os.path.isfile(test_plist))
                 self.assertFalse(backend.is_auto_boot_enabled())
 
+    def test_create_shortcut_non_windows_guard(self):
+        """create_shortcut.py must exit cleanly without error on non-Windows platforms."""
+        import subprocess
+        result = subprocess.run(
+            [sys.executable, "-c", "import sys; sys.platform = 'darwin'; import create_shortcut"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("Desktop .lnk shortcuts are only applicable to Windows", result.stdout)
+
 
 if __name__ == "__main__":
+
     unittest.main()

@@ -1,6 +1,6 @@
 # GlideText 🎙️
 
-An open, privacy-first, locally transcribed voice dictation tool for Windows — built as an offline-capable, developer-friendly alternative to Wispr Flow (formerly named **LocalFlow**). Hold a hotkey, speak naturally, and polished, context-aware text is typed directly into whichever application is currently focused.
+An open, privacy-first, locally transcribed voice dictation tool for Windows & macOS — built as an offline-capable, developer-friendly alternative to Wispr Flow (formerly named **LocalFlow**). Hold a hotkey, speak naturally, and polished, context-aware text is typed directly into whichever application is currently focused.
 
 ---
 
@@ -48,7 +48,7 @@ GlideText uses a strictly sequential, non-blocking 4-tier fallback pipeline. You
 1. **Priority 1 — FreeLLMAPI (`http://127.0.0.1:3001`)**  
    Primary AI brain utilizing pooled free-tier token routing.
 2. **Priority 2 — Google Gemini API**  
-   Direct cloud fallback using your own Google AI Studio key (`gemini-2.5-flash` / `gemini-1.5-flash`), stored securely in Windows Credential Manager.
+   Direct cloud fallback using your own Google AI Studio key (`gemini-2.5-flash` / `gemini-1.5-flash`), stored securely in Windows Credential Manager or macOS Keychain via `keyring`.
 3. **Priority 3 — Local LLM via Ollama (`http://127.0.0.1:11434`)**  
    Completely offline, on-device text cleanup (e.g., `llama3.2:3b`, `qwen2.5:3b`, or `mistral`).
 4. **Degraded Tier — Raw Fallback**  
@@ -104,9 +104,10 @@ We believe in engineering transparency rather than marketing hype. Here is what 
 - **Prompt Injection Defense:** Surrounding editor text is sandboxed as passive `<untrusted_cursor_context_data>` to prevent malicious text inside opened files from hijacking LLM system prompts.
 
 ### 3. Safe Text Injection
-- **Target Window Verification:** Confirms window focus matches the window active when recording started, preventing accidental text insertion into the wrong window if you alt-tab.
-- **Clipboard vs Typing Engine:** Standard single-line ASCII text is typed directly via keystroke simulation. Multiline text and complex Unicode scripts (Devanagari, emojis, non-Latin alphabets) are pasted safely via clipboard (`Ctrl+V`), and your previous clipboard contents are restored immediately.
-- **Terminal Guard:** In shell environments, unprompted newlines are stripped to prevent accidental execution of unfinished commands.
+- **Target Window Verification:** Confirms window focus matches the window active when recording started, preventing accidental text insertion into the wrong window if you switch applications.
+- **Clipboard vs Typing Engine:** Standard single-line ASCII text is typed directly via keystroke simulation. Multiline text and complex Unicode scripts (Devanagari, emojis, non-Latin alphabets) are pasted safely via clipboard (`Ctrl+V` on Windows, `Cmd+V` on macOS), and your previous clipboard contents are restored immediately.
+- **Terminal Guard:** In shell environments (Windows Terminal, PowerShell, Command Prompt, `Terminal.app`, `iTerm2`, `Warp`, `kitty`, `alacritty`), unprompted newlines are stripped to prevent accidental execution of unfinished commands.
+
 
 ---
 
@@ -128,23 +129,29 @@ GlideText includes a safe, local voice command layer that operates strictly on r
 
 ## 🔒 Security & Privacy
 
-- **Zero Audio Cloud Telemetry:** Raw audio is processed strictly on-device in `%TEMP%\glidetext` and wiped immediately after transcription.
-- **Credential Safety:** Google Gemini API keys are saved in Windows Credential Manager (`keyring`), never hardcoded in source files or config files.
+- **Zero Audio Cloud Telemetry:** Raw audio is processed strictly on-device in temporary directories (`%TEMP%\glidetext` on Windows, `$TMPDIR/glidetext` on macOS) and wiped immediately after transcription.
+- **Credential Safety:** Google Gemini API keys are saved securely in Windows Credential Manager or macOS Keychain via `keyring`, never hardcoded in source files or plain-text config files.
+- **Sensitive App & Password Field Defense:** Dictation and context capture are automatically refused when sensitive applications (e.g. 1Password, Bitwarden, Dashlane, Keychain Access, SecurityAgent) or password fields (macOS Carbon Secure Event Input, Windows credential prompts) are focused.
 - **Log Sanitization:** All logs, exceptions, and crash reports automatically scrub API keys, bearer tokens, and credentials before writing to disk.
 - **Git Hygiene:** Local configuration (`config.txt`), SQLite databases (`*.db`), audio recordings (`*.wav`), and logs (`*.log`) are strictly excluded in `.gitignore`.
+
 
 ---
 
 ## 🚀 Setup & Installation
 
 ### Prerequisites
-- **OS:** Windows 10 or Windows 11 (64-bit)
+- **Operating System:**
+  - **Windows:** Windows 10 or Windows 11 (64-bit)
+  - **macOS:** macOS 12 (Monterey), 13 (Ventura), 14 (Sonoma), or 15+ (Sequoia) on Apple Silicon (M1, M2, M3, M4, M5 — Base/Pro/Max) or Intel Macs.
 - **Python:** Python 3.10 to 3.12
 - **Audio:** Working microphone
-- **Optional for FreeLLMAPI:** Node.js (v18+) if running FreeLLMAPI locally
+- **Optional for FreeLLMAPI:** Node.js (v18+) and npm
 - **Optional for Local LLM:** [Ollama](https://ollama.com/) installed with `ollama pull llama3.2:3b`
 
 ### Installation
+
+#### Windows
 ```cmd
 git clone https://github.com/sarawgiapoorv/GlideText.git
 cd GlideText
@@ -154,9 +161,30 @@ python -m venv .venv
 .\.venv\Scripts\pip.exe install -r requirements.txt
 ```
 
+#### macOS (Quickstart via Setup Script)
+```bash
+git clone https://github.com/sarawgiapoorv/GlideText.git
+cd GlideText
+
+chmod +x setup_macos.sh
+./setup_macos.sh
+```
+The setup script will verify your Python and Node.js environment, build the virtual environment in `.venv`, install dependencies, make `Launch_GlideText.command` executable, and run a macOS permissions diagnostic.
+
+#### macOS (Manual Setup)
+```bash
+git clone https://github.com/sarawgiapoorv/GlideText.git
+cd GlideText
+
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip wheel
+pip install -r requirements.txt
+```
+
 ### Setting Up FreeLLMAPI (Tier 1 AI Brain)
 1. Clone and launch the FreeLLMAPI service (see [FreeLLMAPI](https://github.com/tashfeenahmed/freellmapi)):
-   ```cmd
+   ```bash
    git clone https://github.com/tashfeenahmed/freellmapi.git
    cd freellmapi
    npm install
@@ -164,54 +192,87 @@ python -m venv .venv
    ```
    *(By default, FreeLLMAPI runs on `http://127.0.0.1:3001`)*
 2. In GlideText, copy `config.example.txt` to `config.txt` and set the path to your FreeLLMAPI directory:
-   ```text
-   0
-   FREELLMAPI_DIR=C:\path\to\freellmapi
-   WHISPER_MODEL=base
-   WHISPER_LANGUAGE=auto
-   ```
+   - Windows: `FREELLMAPI_DIR=C:\path\to\freellmapi`
+   - macOS: `FREELLMAPI_DIR=/path/to/freellmapi`
    GlideText can automatically start and manage the FreeLLMAPI background server for you.
 
 ### Running GlideText
-* **Standard Launch:** Double-click `Launch_GlideText.bat` or run:
-  ```cmd
-  .\.venv\Scripts\python.exe main.py
-  ```
-* **Silent Background / System Tray Mode:**
-  ```cmd
-  .\.venv\Scripts\python.exe main.py --silent
-  ```
+* **Windows:**
+  - Standard Launch: Double-click `Launch_GlideText.bat` or run `.\.venv\Scripts\python.exe main.py`
+  - Silent Background / Tray Mode: `.\.venv\Scripts\python.exe main.py --silent`
+* **macOS:**
+  - Standard Launch: Double-click `Launch_GlideText.command` in Finder or run `python main.py`
+  - Silent Background / Tray Mode: `python main.py --silent`
 
 ### Running Unit Tests
-GlideText includes an extensive suite of automated tests covering audio pipelines, LLM fallback routing, context snapshots, voice commands, and text injection:
-```cmd
+GlideText includes a comprehensive cross-platform test suite:
+```bash
+# Windows
 .\.venv\Scripts\python.exe -m unittest discover tests
+
+# macOS
+python -m unittest discover tests
 ```
+
+---
+
+## 🍎 macOS Permissions Guide
+
+macOS protects user privacy by requiring explicit user consent (TCC) for microphone input, global key listeners, and synthetic keystroke injection. **GlideText never requires and should never be run with `sudo`.**
+
+When running GlideText for the first time on macOS, ensure the following permissions are granted to your host terminal or app (e.g. `Terminal.app`, `iTerm.app`, `Visual Studio Code`, or the Python launcher):
+
+1. **Accessibility** (*Required for text injection & simulated paste*):
+   - Path: **System Settings > Privacy & Security > Accessibility**
+   - Enable your terminal emulator or Python.
+2. **Input Monitoring** (*Required for global push-to-talk hotkey listener*):
+   - Path: **System Settings > Privacy & Security > Input Monitoring**
+   - Enable your terminal emulator or Python.
+3. **Microphone** (*Required for voice recording*):
+   - Path: **System Settings > Privacy & Security > Microphone**
+   - Allow microphone access when prompted on first dictation.
+
+### Permissions Diagnostic Tool
+To verify permission status at any time from your command line:
+```bash
+python -m platform_compat.permissions_check
+```
+You can also click the **"Check Permissions"** button in GlideText's Settings UI at any time.
 
 ---
 
 ## ⌨️ Hotkeys Reference
 
-| Hotkey | Mode | Function |
-|---|---|---|
-| **Right Alt** (Hold & Release) | Push-to-Talk | Hold to speak, release to transcribe, polish, and type into active window. |
-| **Ctrl + Shift + A** | Continuous Mode | Hands-free continuous dictation using Voice Activity Detection (VAD). |
-| **Ctrl + Shift + W** | Floating Widget | Toggle floating minimal desktop status widget / full GUI dashboard. |
-| **Escape** | Cancel | Press while recording or transcribing to abort without typing. |
+| Hotkey | Platform | Mode | Function |
+|---|---|---|---|
+| **Right Alt** (Hold & Release) | Windows | Push-to-Talk | Hold to speak, release to transcribe, polish, and type into active window. |
+| **Right Option** (Hold & Release) | macOS | Push-to-Talk | Hold to speak, release to transcribe, polish, and type into active window. |
+| **Ctrl + Shift + A** | Both | Continuous Mode | Hands-free continuous dictation using Voice Activity Detection (VAD). |
+| **Ctrl + Shift + W** | Both | Floating Widget | Toggle floating minimal desktop status widget / full GUI dashboard. |
+| **Escape** | Both | Cancel | Press while recording or transcribing to abort without typing. |
+| **Cmd + W** | macOS | Window | Hide / minimize main window (keeps running in background/tray). |
+| **Cmd + ,** | macOS | Settings | Toggle Settings panel. |
+| **Cmd + Q** | macOS | Quit | Cleanly shut down GlideText and background servers. |
+
+> **Custom Hotkeys:** Hotkeys are customizable via `config.txt` (e.g., `HOTKEY_PUSH_TO_TALK=alt_r` or `HOTKEY_CONTINUOUS=ctrl+shift+a`).
 
 ---
 
 ## 🛠️ Troubleshooting & Common Issues
 
-- **Nothing types into an Administrator command prompt or Task Manager:**  
-  *Cause:* Windows UIPI blocks normal apps from sending keystrokes to elevated apps.  
+- **Nothing types into an Administrator command prompt or Task Manager (Windows):**  
+  *Cause:* Windows UIPI blocks standard apps from sending keystrokes to elevated apps.  
   *Fix:* Right-click `Launch_GlideText.bat` and select **Run as Administrator**.
+- **Keystrokes not typing or hotkey not responding (macOS):**  
+  *Cause:* Accessibility or Input Monitoring permission is not granted to the terminal or Python host.  
+  *Fix:* Run `python -m platform_compat.permissions_check` and enable permissions in **System Settings > Privacy & Security**. Restart the terminal after granting.
 - **FreeLLMAPI status shows "Offline":**  
   *Cause:* Node.js process is not running on port 3001 or Node.js is not on PATH.  
-  *Fix:* Start FreeLLMAPI manually in terminal (`npm start`), or verify the `FREELLMAPI_DIR` path in `config.txt` or GUI Settings.
+  *Fix:* Start FreeLLMAPI manually (`npm start`), or verify the `FREELLMAPI_DIR` path in `config.txt` or GUI Settings.
 - **First dictation is slow:**  
   *Cause:* Whisper downloads its model weights on the very first run (stored in HuggingFace cache).  
   *Fix:* Normal; subsequent runs load instantly from local disk cache.
 - **Accidental double paste or clipboard not restored:**  
-  *Cause:* Certain security software or clipboard history tools aggressively intercept clipboard writes.  
+  *Cause:* Certain clipboard history tools aggressively intercept clipboard writes.  
   *Fix:* In GlideText settings, enable standard keystroke typing mode if your target app supports it.
+
